@@ -51,6 +51,27 @@ Metadata:
           - PseriesCngName
           - PseriesQueueName
       - Label:
+          default: "4b. GPU Queues - g7e (Optional): full=48xlarge, half=24xlarge, each On-Demand and Spot"
+        Parameters:
+          - DeployG7eFull
+          - G7eFullName
+          - G7eFullMinCount
+          - G7eFullMaxCount
+          - DeployG7eFullSpot
+          - G7eFullSpotName
+          - G7eFullSpotMinCount
+          - G7eFullSpotMaxCount
+          - DeployG7eHalf
+          - G7eHalfName
+          - G7eHalfMinCount
+          - G7eHalfMaxCount
+          - DeployG7eHalfSpot
+          - G7eHalfSpotName
+          - G7eHalfSpotMinCount
+          - G7eHalfSpotMaxCount
+          - G7eUsePlacementGroup
+          - G7eSpotAllocationStrategy
+      - Label:
           default: "5. Additional Cluster Configuration (Monitoring, Multi-User, Container Runtime)"
         Parameters:
           - MonitoringStack
@@ -148,6 +169,42 @@ Metadata:
         default: "GPU node group name"
       PseriesQueueName:
         default: "GPU queue name"
+      DeployG7eFull:
+        default: "Deploy g7e full (48xlarge) On-Demand queue"
+      G7eFullName:
+        default: "g7e full On-Demand queue/node-group name"
+      G7eFullMinCount:
+        default: "g7e full On-Demand min nodes"
+      G7eFullMaxCount:
+        default: "g7e full On-Demand max nodes"
+      DeployG7eFullSpot:
+        default: "Deploy g7e full (48xlarge) Spot queue"
+      G7eFullSpotName:
+        default: "g7e full Spot queue/node-group name"
+      G7eFullSpotMinCount:
+        default: "g7e full Spot min nodes"
+      G7eFullSpotMaxCount:
+        default: "g7e full Spot max nodes"
+      DeployG7eHalf:
+        default: "Deploy g7e half (24xlarge) On-Demand queue"
+      G7eHalfName:
+        default: "g7e half On-Demand queue/node-group name"
+      G7eHalfMinCount:
+        default: "g7e half On-Demand min nodes"
+      G7eHalfMaxCount:
+        default: "g7e half On-Demand max nodes"
+      DeployG7eHalfSpot:
+        default: "Deploy g7e half (24xlarge) Spot queue"
+      G7eHalfSpotName:
+        default: "g7e half Spot queue/node-group name"
+      G7eHalfSpotMinCount:
+        default: "g7e half Spot min nodes"
+      G7eHalfSpotMaxCount:
+        default: "g7e half Spot max nodes"
+      G7eUsePlacementGroup:
+        default: "g7e On-Demand: use cluster placement group (false relaxes for capacity)"
+      G7eSpotAllocationStrategy:
+        default: "g7e Spot allocation strategy"
       Capacity:
         default: "FSx for Lustre (/fsx) capacity (GiB)"
       LustreDeploymentType:
@@ -504,7 +561,7 @@ Parameters:
       type (e.g. the default c6i.4xlarge) fails to launch with count > 0. No
       effect on the P-series GPU CNG.
     Default: 0
-    AllowedValues: [0, 1, 2]
+    AllowedValues: [0, 1, 2, 4]
 
   OnDemandPlacementGroupName:
     Type: String
@@ -542,6 +599,7 @@ Parameters:
       template AND interface count are selected automatically from this value:
       p5* use add-cng-p5.yaml (p5/p5e = 32 NICs, p5en = 16), p6-b200.48xlarge uses
       add-cng-p6-b200.yaml (8 NICs), p6-b300.48xlarge uses add-cng-p6-b300.yaml (17 NICs).
+      For g7e, use the dedicated g7e queues in section 4b instead.
     Default: "p5.48xlarge"
     AllowedValues:
       - p5.48xlarge
@@ -572,6 +630,127 @@ Parameters:
       Blocks ONLY -- do NOT put an On-Demand Capacity Reservation (ODCR) ID here;
       an "open" ODCR is consumed automatically by On-Demand launches, so for ODCR
       leave this empty.
+
+  # ---------------------------------------------------------------------------
+  # g7e GPU queues (section 4b). Four independent, separately-toggleable queues:
+  #   full      = g7e.48xlarge On-Demand  (8 GPUs, 4-NIC EFA, add-cng-g7e.yaml)
+  #   full-spot = g7e.48xlarge Spot        (same template, PurchaseOption=SPOT)
+  #   half      = g7e.24xlarge On-Demand  (4 GPUs, 2-NIC EFA, add-cng-g7e-24xl.yaml)
+  #   half-spot = g7e.24xlarge Spot        (same 24xl template, PurchaseOption=SPOT)
+  # Deploy any combination. Independent of DeployPseriesCNG (P5/P6) above.
+  # ---------------------------------------------------------------------------
+
+  # --- g7e full (48xlarge) On-Demand ---
+  DeployG7eFull:
+    Type: String
+    Description: Deploy the g7e.48xlarge (full, 8-GPU) On-Demand queue
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eFullName:
+    Type: String
+    Description: Node group + queue name for the g7e full On-Demand queue
+    Default: "gpu-g7e-full"
+  G7eFullMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e full On-Demand queue
+    Default: 2
+    MinValue: 0
+  G7eFullMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e full On-Demand queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e full (48xlarge) Spot ---
+  DeployG7eFullSpot:
+    Type: String
+    Description: Deploy the g7e.48xlarge (full, 8-GPU) Spot queue
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eFullSpotName:
+    Type: String
+    Description: Node group + queue name for the g7e full Spot queue
+    Default: "gpu-g7e-full-spot"
+  G7eFullSpotMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e full Spot queue
+    Default: 2
+    MinValue: 0
+  G7eFullSpotMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e full Spot queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e half (24xlarge) On-Demand ---
+  DeployG7eHalf:
+    Type: String
+    Description: Deploy the g7e.24xlarge (half, 4-GPU) On-Demand queue
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eHalfName:
+    Type: String
+    Description: Node group + queue name for the g7e half On-Demand queue
+    Default: "gpu-g7e-half"
+  G7eHalfMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e half On-Demand queue
+    Default: 2
+    MinValue: 0
+  G7eHalfMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e half On-Demand queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e half (24xlarge) Spot ---
+  DeployG7eHalfSpot:
+    Type: String
+    Description: Deploy the g7e.24xlarge (half, 4-GPU) Spot queue
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eHalfSpotName:
+    Type: String
+    Description: Node group + queue name for the g7e half Spot queue
+    Default: "gpu-g7e-half-spot"
+  G7eHalfSpotMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e half Spot queue
+    Default: 2
+    MinValue: 0
+  G7eHalfSpotMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e half Spot queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- shared g7e knobs (apply to whichever g7e queues are deployed) ---
+  G7eUsePlacementGroup:
+    Type: String
+    Description: >-
+      (g7e On-Demand queues only) Launch On-Demand g7e nodes into a cluster placement
+      group. 'true' (default) gives lowest inter-node latency for tightly-coupled
+      multi-node jobs. Set 'false' to relax placement — a cluster placement group
+      requires all instances in one tight physical group, which can cause
+      InsufficientInstanceCapacity for scarce GPU types like g7e even when the AZ has
+      capacity; relaxing it improves On-Demand launch success (recommended for
+      single-node jobs or when you hit capacity errors). No effect on the Spot queues.
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  G7eSpotAllocationStrategy:
+    Type: String
+    Description: >-
+      EC2 Spot allocation strategy for the g7e Spot queues (full-spot / half-spot).
+      price-capacity-optimized (default) balances lowest price with the deepest,
+      least-interrupted Spot pools (recommended).
+    Default: price-capacity-optimized
+    AllowedValues:
+      - lowest-price
+      - capacity-optimized
+      - price-capacity-optimized
 
   RootVolumeSize:
     Type: Number
@@ -658,6 +837,13 @@ Conditions:
     - !Condition DeployPseriesCNGEnabled
     - !Not [!Equals [!Ref PseriesInstanceType, 'p6-b200.48xlarge']]
     - !Not [!Equals [!Ref PseriesInstanceType, 'p6-b300.48xlarge']]
+  # g7e queues — four independent toggles (full/half x On-Demand/Spot), each its
+  # own nested stack. Full = 48xlarge (add-cng-g7e.yaml), half = 24xlarge
+  # (add-cng-g7e-24xl.yaml). Spot queues set PurchaseOption=SPOT on the same template.
+  DeployG7eFullEnabled: !Equals [!Ref DeployG7eFull, 'true']
+  DeployG7eFullSpotEnabled: !Equals [!Ref DeployG7eFullSpot, 'true']
+  DeployG7eHalfEnabled: !Equals [!Ref DeployG7eHalf, 'true']
+  DeployG7eHalfSpotEnabled: !Equals [!Ref DeployG7eHalfSpot, 'true']
 
 Resources:
   #############################################################################
@@ -990,6 +1176,202 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
+
+  #############################################################################
+  # 6d. g7e full (48xlarge, 4-NIC EFA) — On-Demand
+  #############################################################################
+  G7eFullCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eFullEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7e.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7e.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eFullName
+        QueueName: !Ref G7eFullName
+        InstanceType: g7e.48xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eFullMaxCount
+        MinCount: !Ref G7eFullMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref G7eUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eFull'
+
+  #############################################################################
+  # 6e. g7e full (48xlarge, 4-NIC EFA) — Spot
+  #############################################################################
+  G7eFullSpotCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eFullSpotEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7e.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7e.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eFullSpotName
+        QueueName: !Ref G7eFullSpotName
+        InstanceType: g7e.48xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eFullSpotMaxCount
+        MinCount: !Ref G7eFullSpotMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: SPOT
+        SpotAllocationStrategy: !Ref G7eSpotAllocationStrategy
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eFullSpot'
+
+  #############################################################################
+  # 6f. g7e half (24xlarge, 2-NIC EFA) — On-Demand
+  #############################################################################
+  G7eHalfCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eHalfEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7e-24xl.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7e-24xl.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eHalfName
+        QueueName: !Ref G7eHalfName
+        InstanceType: g7e.24xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eHalfMaxCount
+        MinCount: !Ref G7eHalfMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref G7eUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eHalf'
+
+  #############################################################################
+  # 6g. g7e half (24xlarge, 2-NIC EFA) — Spot
+  #############################################################################
+  G7eHalfSpotCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eHalfSpotEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7e-24xl.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7e-24xl.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eHalfSpotName
+        QueueName: !Ref G7eHalfSpotName
+        InstanceType: g7e.24xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eHalfSpotMaxCount
+        MinCount: !Ref G7eHalfSpotMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: SPOT
+        SpotAllocationStrategy: !Ref G7eSpotAllocationStrategy
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eHalfSpot'
 
 Outputs:
   ClusterId:

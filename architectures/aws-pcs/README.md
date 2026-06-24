@@ -178,6 +178,8 @@ automatically.
 | `p5en.48xlarge` | 8× H200 | 16 | `add-cng-p5.yaml` |
 | `p6-b200.48xlarge` | 8× B200 | 8 | `add-cng-p6-b200.yaml` |
 | `p6-b300.48xlarge` | 8× B300 | 16 (of 17 interfaces; the primary is ENA-only) | `add-cng-p6-b300.yaml` |
+| `g7e.48xlarge` | 8× RTX PRO 6000 | 4 | `add-cng-g7e.yaml` |
+| `g7e.24xlarge` | 4× RTX PRO 6000 | 2 | `add-cng-g7e-24xl.yaml` |
 
 **Capacity options:**
 - **On-Demand**: leave `CapacityReservationId` empty.
@@ -648,6 +650,8 @@ parameter and default, see [PARAMETERS.md](./docs/PARAMETERS.md).
 | [`add-cng-p5.yaml`](./assets/add-cng-p5.yaml) | P5/P5e/P5en nodes (16/32 EFA interfaces, by type) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p5.yaml&stackName=pcs-add-cng-p5) |
 | [`add-cng-p6-b200.yaml`](./assets/add-cng-p6-b200.yaml) | P6-B200 nodes (8 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p6-b200.yaml&stackName=pcs-add-cng-p6-b200) |
 | [`add-cng-p6-b300.yaml`](./assets/add-cng-p6-b300.yaml) | P6-B300 nodes (17 interfaces: 16 EFA + 1 ENA) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p6-b300.yaml&stackName=pcs-add-cng-p6-b300) |
+| [`add-cng-g7e.yaml`](./assets/add-cng-g7e.yaml) | g7e.48xlarge nodes (4 EFA interfaces); On-Demand or Spot via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e.yaml&stackName=pcs-add-cng-g7e) |
+| [`add-cng-g7e-24xl.yaml`](./assets/add-cng-g7e-24xl.yaml) | g7e.24xlarge nodes (2 EFA interfaces); On-Demand or Spot via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e-24xl.yaml&stackName=pcs-add-cng-g7e-24xl) |
 | [`pcs-ready-dlami-with-enroot-pyxis.yaml`](./assets/pcs-ready-dlami-with-enroot-pyxis.yaml) | EC2 Image Builder: bake Enroot 3.5.0 + Pyxis 0.20.0 into the PCS-Ready DLAMI | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ready-dlami-with-enroot-pyxis.yaml&stackName=pcs-dlami) |
 
 `add-cng*` templates create a Slurm queue only when `QueueName` is set (leave it empty
@@ -684,8 +688,8 @@ pcs-ml-cluster-deploy-all.yaml                    ← user deploys this
 │          └─ setup-directory.sh client (when DirectoryRole=client)
 │
 └─► add-cng-p5.yaml / add-cng-p6-b200.yaml       ← GPU queue (optional)
-    / add-cng-p6-b300.yaml
-      • Multi-NIC EFA (16/32 cards, per-family)
+    / add-cng-p6-b300.yaml / add-cng-g7e.yaml / add-cng-g7e-24xl.yaml
+      • Multi-NIC EFA (4/8/16/32 cards, per-family)
       • MonitoringRole=compute → DCGM Exporter
       • Same external script pattern as compute CNG
 
