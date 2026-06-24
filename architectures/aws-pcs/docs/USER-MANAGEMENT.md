@@ -32,10 +32,12 @@ drops them under the default `env_reset`/`secure_path`.
 | Add user to Slurm accounting | `sudo /opt/aws/pcs/scheduler/slurm-25.11/bin/sacctmgr -i add user alice Account=ml-team` (root = accounting admin) |
 | Verify user on compute node | `srun -N1 -n1 -p cpu1 id alice` |
 
-`ldap-add-user.sh` is a helper script installed on the login node at
-`/usr/local/bin/` (it wraps `ldapadd`+`ldappasswd` so you don't need the LDAP
-syntax). List/delete/reset use the raw `ldap*` tools directly — the full
-commands are documented in each section below.
+`ldap-add-user.sh` is a helper script that wraps `ldapadd`+`ldappasswd` so you
+don't need the LDAP syntax. It is **installed automatically at first boot** to
+`/usr/local/bin/ldap-add-user.sh` on the login node (see
+[How the helper gets onto the login node](#how-the-helper-gets-onto-the-login-node)
+if the command is missing). List/delete/reset use the raw `ldap*` tools directly —
+the full commands are documented in each section below.
 
 ---
 
@@ -196,16 +198,24 @@ All commands below run on the **login node** as root (`sudo`).
 ### Getting the admin password
 
 The LDAP admin password is auto-generated at cluster creation and stored in
-AWS Systems Manager Parameter Store:
+AWS Systems Manager Parameter Store. It is keyed by the PCS cluster ID, which the
+login node carries as its own `pcs-cluster-id` instance tag:
 
 ```bash
-CLUSTER_ID=<from stack output, e.g. pcs_abc123>
+# Read the cluster ID from this login node's instance tag. The node enforces
+# IMDSv2 (HttpTokens=required), so fetch a session token first; a plain `curl`
+# returns 401 and `-s` would leave CLUSTER_ID empty. (Or pass the cluster's
+# ClusterId stack output explicitly: CLUSTER_ID=<from stack output, e.g. pcs_abc123>.)
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+CLUSTER_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/tags/instance/pcs-cluster-id)
 
 aws ssm get-parameter \
   --name "/pcs/${CLUSTER_ID}/ldap/admin-password" \
   --with-decryption \
   --query 'Parameter.Value' \
-  --output text
+  --output text --region $REGION
 ```
 
 > **If SSM is empty** (instance role lacked the permission at first boot):
@@ -235,11 +245,54 @@ This creates the user with:
 - Shell: `/bin/bash`
 - A random initial password (printed to stdout)
 
-**With an SSH key** (user can log in immediately):
+#### How the helper gets onto the login node
+
+You don't copy it manually. When the directory server is set up at first boot,
+`setup-directory.sh` (running as the `server` role on the login node) fetches
+`scripts/ldap-add-user.sh` **from the same S3 bucket/prefix you staged the templates
+to** and installs it to `/usr/local/bin/ldap-add-user.sh` (mode `755`). This is why
+the deploy's staging step syncs `*.sh` as well as `*.yaml` — the helper has to be in
+your bucket under `scripts/` for the login node to pull it.
+
+If `ldap-add-user.sh` is **not found** on the login node, the first-boot fetch was
+skipped or failed. Check the directory setup log:
 
 ```bash
-sudo LDAP_ADMIN_PASSWORD="<password>" ldap-add-user.sh alice 10001 3000 "ssh-rsa AAAA... alice@laptop"
+grep ldap-add-user /var/log/directory-setup.log
+# "Installed helper: ..."  → present; check your PATH / use the full path
+# "could not fetch ... from s3://..."  → the script wasn't in your bucket under scripts/
+# "S3_BUCKET unset; skipping ..."      → deployed without an S3 bucket (e.g. modular deploy)
 ```
+
+To recover without redeploying, copy it from your bucket (or straight from this
+repo) onto the login node yourself:
+
+```bash
+# From your staging bucket (same BUCKET/PREFIX used at deploy time):
+sudo aws s3 cp "s3://${BUCKET}/${PREFIX}scripts/ldap-add-user.sh" \
+  /usr/local/bin/ldap-add-user.sh
+sudo chmod 755 /usr/local/bin/ldap-add-user.sh
+```
+
+(All the LDAP operations below also work with the raw `ldapadd`/`ldappasswd` tools
+if you'd rather not use the helper at all — the helper just saves you the LDIF.)
+
+**Authorizing an SSH key.** The helper's optional 4th argument stores the key as
+an LDAP `sshPublicKey` attribute, but **sshd does not read it** — SSSD is not
+configured with an `AuthorizedKeysCommand` (`sss_ssh_authorizedkeys`), so passing
+the key to the helper alone does **not** let the user log in by key. To authorize a
+key, seed `~/.ssh/authorized_keys` on the shared `/home` (OpenZFS) from the login
+node:
+
+```bash
+sudo install -d -m 700 -o alice -g clusterusers /home/alice/.ssh
+echo "ssh-ed25519 AAAA... alice@laptop" | sudo tee /home/alice/.ssh/authorized_keys
+sudo chown alice:clusterusers /home/alice/.ssh/authorized_keys
+sudo chmod 600 /home/alice/.ssh/authorized_keys
+```
+
+`/home` is shared, so the key is in place on every node. The user can then SSH to
+the login node directly (from a host inside `SSHAccessCidr`).
 
 **Verifying the user was created:**
 
@@ -573,8 +626,9 @@ sudo systemctl start slapd
 | **SSH over SSM** | Security-sensitive environments | IAM credentials + SSM plugin per user |
 | **SSM Session Manager** | Admin-only access | IAM credentials only |
 
-For multi-user clusters, **Direct SSH** is recommended. Users connect with
-their SSH key that was added during user creation:
+For multi-user clusters, **Direct SSH** is recommended. Users connect with the
+SSH key authorized in their `~/.ssh/authorized_keys` (see
+[Adding a user](#adding-a-user) — the key is seeded there, not served from LDAP):
 
 ```bash
 ssh alice@<login-node-public-ip>

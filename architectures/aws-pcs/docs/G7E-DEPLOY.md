@@ -221,67 +221,15 @@ srun --partition=gpu-g7e-half fi_info -p efa | grep -c "provider: efa"   # expec
 srun --partition=gpu-g7e-full-spot --gpus-per-node=8 nvidia-smi -L
 ```
 
-### Adding the first user (SSH login)
+### Adding users
 
 This deploy enabled `DirectoryService=OpenLDAP-LoginNode`, which stands up the
 directory **structure** (the `People`/`Groups` OUs and a `clusterusers` group) but
-**no login users** — only the LDAP admin DN. Add users from the login node with the
-`ldap-add-user.sh` helper (installed at `/usr/local/bin/`). Run these on the login
-node (over SSM, as in the connect step above):
-
-```bash
-# The PCS cluster ID — read from this login node's own instance tag
-CLUSTER_ID=$(curl -s http://169.254.169.254/latest/meta-data/tags/instance/pcs-cluster-id)
-
-# Fetch the auto-generated LDAP admin password (needed by the helper)
-export LDAP_ADMIN_PASSWORD=$(aws ssm get-parameter \
-  --name "/pcs/${CLUSTER_ID}/ldap/admin-password" \
-  --with-decryption --query 'Parameter.Value' --output text)
-
-# Create a POSIX user. Args: <username> <uid> [gid=3000] [ssh-pub-key]
-# uid is REQUIRED and must be cluster-unique (>= 1001); gid 3000 = clusterusers.
-sudo -E /usr/local/bin/ldap-add-user.sh alice 10001 3000
-
-# Confirm the user now resolves cluster-wide (SSSD)
-getent passwd alice
-```
-
-The helper prints a random initial password for the account. (`CLUSTER_ID` is also
-the stack's `ClusterId` output if you'd rather pass it explicitly.)
-
-**Authorize an SSH key.** The home dir is auto-created on first login, but to log
-in by key you seed `~/.ssh/authorized_keys` on the shared `/home` (OpenZFS) from
-the login node — SSSD is not configured to serve SSH keys from LDAP, so the
-helper's optional 4th key arg is stored but not used by `sshd`:
-
-```bash
-sudo install -d -m 700 -o alice -g clusterusers /home/alice/.ssh
-echo "ssh-ed25519 AAAA... you@laptop" | sudo tee /home/alice/.ssh/authorized_keys
-sudo chown alice:clusterusers /home/alice/.ssh/authorized_keys
-sudo chmod 600 /home/alice/.ssh/authorized_keys
-```
-
-Then SSH in directly from a host inside your `SSHAccessCidr` (the login node has a
-public IP and SSH/22 open to that CIDR):
-
-```bash
-LOGIN_IP=$(aws ec2 describe-instances --region ${REGION} \
-  --filters "Name=tag:pcs-cluster-id,Values=${CLUSTER_ID}" \
-            "Name=tag:Name,Values=PCS-login" \
-            "Name=instance-state-name,Values=running" \
-  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
-ssh alice@${LOGIN_IP}
-```
-
-Because Slurm accounting is enabled (`ManagedAccounting=enabled`), also register the
-user with the accounting DB so their jobs are tracked:
-
-```bash
-sudo sacctmgr -i add user alice account=default
-```
-
-See [USER-MANAGEMENT.md](./USER-MANAGEMENT.md) for groups, removing users, and
-Slurm accounting details.
+**no login users** — only the LDAP admin DN. Create and manage users from the login
+node (connect over SSM as above), following
+**[USER-MANAGEMENT.md](./USER-MANAGEMENT.md)** — it covers fetching the LDAP admin
+password, adding users with `ldap-add-user.sh`, authorizing SSH keys, and (since this
+deploy set `ManagedAccounting=enabled`) registering users with Slurm accounting.
 
 ### Enabling containerized (NCCL) jobs later
 
