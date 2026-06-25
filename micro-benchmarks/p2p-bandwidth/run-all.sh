@@ -40,6 +40,8 @@ sub "NCCL sendrecv"                       "${HERE}/nccl-sendrecv.sbatch"
 
 echo
 echo "== Inter-node (EFA, needs 2 nodes) =="
+sub "libfabric fabtests, host"            --export=ALL,BUF=host "${HERE}/fabtests-internode-efa.sbatch"
+sub "libfabric fabtests, device (cuda)"   --export=ALL,BUF=cuda "${HERE}/fabtests-internode-efa.sbatch"
 sub "OSU over EFA, device (D D)"          --export=ALL,BUFFER_TYPE=D\ D "${HERE}/osu-internode-efa.sbatch"
 sub "OSU over EFA, host (H H)"            --export=ALL,BUFFER_TYPE=H\ H "${HERE}/osu-internode-efa.sbatch"
 sub "NCCL over EFA"                       "${HERE}/nccl-internode-efa.sbatch"

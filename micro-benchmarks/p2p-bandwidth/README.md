@@ -19,6 +19,7 @@ NCCL (what real training uses) achieves.
 
 | Script | Tool | What it measures |
 |---|---|---|
+| [`fabtests-internode-efa.sbatch`](./fabtests-internode-efa.sbatch) | **libfabric fabtests** `fi_rdm_tagged_bw`, 2 nodes | **Raw libfabric/EFA** bandwidth (no MPI, no NCCL); `BUF=host` or `BUF=cuda` (GPUDirect RDMA). The practical fabric ceiling. |
 | [`osu-internode-efa.sbatch`](./osu-internode-efa.sbatch) | OpenMPI 5 + OSU, 2 nodes | MPI point-to-point **over EFA** between 2 nodes; `D D` uses GPUDirect RDMA, `H H` is host↔host |
 | [`nccl-internode-efa.sbatch`](./nccl-internode-efa.sbatch) | nccl-tests `sendrecv_perf`, 2 nodes (Pyxis) | **NCCL over EFA** between 2 nodes — the path real multi-node training uses |
 
@@ -163,6 +164,10 @@ EFA** instead of within the node over NVLink. Expect inter-node bandwidth to pla
 under NVLink/NVSwitch — which is exactly why training keeps as much traffic intra-node as
 possible. Things to look for:
 
+- **libfabric fabtests** is the rawest EFA number — no MPI, no NCCL. Both OSU-over-EFA
+  and NCCL-over-EFA ride libfabric underneath, so fabtests is the practical ceiling they
+  approach; the gap to each shows that library's overhead. `BUF=cuda` is GPU memory over
+  EFA (GPUDirect RDMA), `BUF=host` is CPU memory over EFA.
 - **OSU `D D` over EFA** uses **GPUDirect RDMA** (NIC DMAs GPU memory directly); the
   `H H` variant is plain host↔host EFA — the gap between them is the GPUDirect benefit.
 - **NCCL over EFA** must show `NET/OFI Selected provider is efa ... (found N nics)` in

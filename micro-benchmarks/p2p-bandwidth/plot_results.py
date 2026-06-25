@@ -125,6 +125,37 @@ def parse_nccl(path):
              "gbps": gbps, "label": "NCCL sendrecv (busbw)"}]
 
 
+# fabtests fi_rdm_tagged_bw table row:
+#   bytes  iters  total      time   MB/sec   usec/xfer  Mxfers/sec
+# e.g. "65536   100   6.40m  0.00s   4521.13   14.50      0.07"
+# The size is the leading integer; MB/sec is the 5th numeric column. total/time carry
+# unit suffixes (k/m/g, s), so match them loosely and pick the bandwidth field.
+_FAB_ROW = re.compile(
+    r"^\s*(\d+)\s+\d+\s+[\d.]+[kmgKMG]?\s+[\d.]+s?\s+([\d.]+)\s+[\d.]+\s+[\d.]+")
+
+
+def parse_fabtests(path):
+    """Parse fabtests fi_rdm_tagged_bw output -> one series of (size, GB/s).
+
+    fabtests reports MB/sec (base-10 MB); convert to GB/s for comparison. The buffer
+    mode (host vs cuda) is taken from the script's 'Buffers : ...' preflight line."""
+    mode = "host"
+    sizes, gbps = [], []
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            if "Buffers" in line and "cuda" in line.lower():
+                mode = "cuda"
+            m = _FAB_ROW.match(line)
+            if m:
+                sizes.append(int(m.group(1)))
+                gbps.append(float(m.group(2)) / 1000.0)  # MB/s -> GB/s
+    if not sizes:
+        return []
+    tag = "device/GPUDirect" if mode == "cuda" else "host"
+    return [{"test": "fabtests", "mode": "fabtests", "pair": None, "sizes": sizes,
+             "gbps": gbps, "label": f"libfabric fabtests ({tag})"}]
+
+
 def parse_nvidia_peaks(path):
     """Extract peak per-pair bandwidth from the NVIDIA p2pBandwidthLatencyTest matrices.
 
@@ -174,6 +205,7 @@ def main(argv=None):
 
     osu_series = []
     nccl_series = []
+    fabtests_series = []
     nvidia_peaks = {}
     for path in args.files:
         if not os.path.exists(path):
@@ -192,7 +224,8 @@ def main(argv=None):
         scope = _scope_of(path)
         osu_found = parse_osu(path)
         nccl_found = parse_nccl(path) if "busbw" in body else []
-        for s in osu_found + nccl_found:
+        fab_found = parse_fabtests(path) if "MB/sec" in body else []
+        for s in osu_found + nccl_found + fab_found:
             s["scope"] = scope
             net = "NVLink" if scope == "intra" else "EFA"
             s["label"] = f"{s['label']} [{net}]"
@@ -202,13 +235,16 @@ def main(argv=None):
         elif nccl_found:
             nccl_series += nccl_found
             print(f"{path}: parsed NCCL series ({len(nccl_found[0]['sizes'])} sizes, {scope}-node)")
+        elif fab_found:
+            fabtests_series += fab_found
+            print(f"{path}: parsed fabtests series ({len(fab_found[0]['sizes'])} sizes, {scope}-node)")
         elif is_nvidia:
             nvidia_peaks = parse_nvidia_peaks(path) or nvidia_peaks
             print(f"{path}: NVIDIA peaks {nvidia_peaks}")
         else:
             print(f"{path}: no recognizable benchmark data")
 
-    if not osu_series and not nccl_series and not nvidia_peaks:
+    if not (osu_series or nccl_series or fabtests_series or nvidia_peaks):
         sys.exit("no parseable benchmark data found in the given files")
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -246,10 +282,11 @@ def main(argv=None):
         fig.savefig(out, dpi=130)
         print(f"wrote {out}")
 
-    # Overlay: every unidirectional-style curve (OSU osu_bw + NCCL sendrecv), both
-    # scopes, on one log-log chart so intra-node NVLink vs inter-node EFA is directly
-    # comparable. Only emit it when more than one scope is present.
-    overlay = [s for s in osu_series if s["test"] == "osu_bw"] + list(nccl_series)
+    # Overlay: every unidirectional-style curve (OSU osu_bw + NCCL sendrecv + libfabric
+    # fabtests), both scopes, on one log-log chart so intra-node NVLink vs inter-node EFA
+    # is directly comparable. Only emit it when more than one scope is present.
+    overlay = ([s for s in osu_series if s["test"] == "osu_bw"]
+               + list(nccl_series) + list(fabtests_series))
     scopes = {s.get("scope", "intra") for s in overlay}
     if overlay and len(scopes) > 1:
         fig, ax = plt.subplots(figsize=(10, 6.5))
