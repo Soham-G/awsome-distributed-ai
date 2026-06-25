@@ -111,6 +111,26 @@ Parameters:
     MinValue: 1
     MaxValue: 52
 
+  SubnetId:
+    Type: String
+    Description: >-
+      (Optional) Subnet for the EC2 Image Builder build instance. Leave empty to
+      use the account's default VPC. Set a subnet with outbound internet access
+      (public, or private + NAT) in accounts that have no default VPC -- e.g. the
+      cluster's own private subnet. The build instance needs egress on 443 for SSM
+      and package downloads.
+    Default: ''
+    AllowedPattern: '^$|^subnet-[0-9a-f]{8,17}$'
+    ConstraintDescription: Must be empty or a valid subnet ID (subnet-xxxxxxxxxxxxxxxxx)
+
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: >-
+      (Optional) Security group IDs for the build instance. Only used when SubnetId
+      is set; leave empty to use the target VPC's default security group. Egress to
+      0.0.0.0/0 on 443 is sufficient.
+    Default: ''
+
 Conditions:
   IsWeeklySchedule: !Equals [!Ref BuildSchedule, 'Weekly']
   IsMonthlySchedule: !Equals [!Ref BuildSchedule, 'Monthly']
@@ -120,6 +140,8 @@ Conditions:
   EnableSsmPublishing: !Equals [!Ref PublishToSsm, 'true']
   EnableLifecycle: !Equals [!Ref EnableLifecyclePolicy, 'true']
   UseCustomBaseAmi: !Not [!Equals [!Ref BaseAmiId, '']]
+  HasSubnet: !Not [!Equals [!Ref SubnetId, '']]
+  HasSecurityGroups: !Not [!Equals [!Join ['', !Ref SecurityGroupIds], '']]
 
 Mappings:
   # PCS-Ready DLAMI AMI SSM parameter paths
@@ -351,6 +373,14 @@ Resources:
         - c6i.4xlarge
         - m6i.4xlarge
       TerminateInstanceOnFailure: true
+      # Launch the build instance into an explicit subnet when provided (required
+      # in accounts without a default VPC). SecurityGroupIds only apply alongside
+      # a subnet; without one, Image Builder falls back to the default VPC.
+      SubnetId: !If [HasSubnet, !Ref SubnetId, !Ref 'AWS::NoValue']
+      SecurityGroupIds: !If
+        - HasSecurityGroups
+        - !Ref SecurityGroupIds
+        - !Ref 'AWS::NoValue'
 
   #############################################################################
   # ImageBuilder Image Recipe
