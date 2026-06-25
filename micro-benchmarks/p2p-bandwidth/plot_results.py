@@ -188,6 +188,12 @@ def _scope_of(path):
     return "inter" if "internode" in base else "intra"
 
 
+def _no_placement_group(body):
+    """True if the inter-node run's annotation shows nodes had no cluster placement
+    group (the Spot default). The scripts print 'placement_group=(none)' per node."""
+    return "placement_group=(none)" in body
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -207,6 +213,7 @@ def main(argv=None):
     nccl_series = []
     fabtests_series = []
     nvidia_peaks = {}
+    inter_no_pg = False   # any inter-node run launched without a placement group?
     for path in args.files:
         if not os.path.exists(path):
             print(f"warning: {path} not found, skipping", file=sys.stderr)
@@ -222,6 +229,8 @@ def main(argv=None):
             body = fh.read()
         is_nvidia = re.search(r"P2P=Enabled.*Bandwidth.*Matrix", body) is not None
         scope = _scope_of(path)
+        if scope == "inter" and _no_placement_group(body):
+            inter_no_pg = True
         osu_found = parse_osu(path)
         nccl_found = parse_nccl(path) if "busbw" in body else []
         fab_found = parse_fabtests(path) if "MB/sec" in body else []
@@ -248,6 +257,17 @@ def main(argv=None):
         sys.exit("no parseable benchmark data found in the given files")
 
     os.makedirs(args.out_dir, exist_ok=True)
+
+    # Caveat stamped on any chart that includes inter-node EFA data taken without a
+    # cluster placement group (the Spot default) — latency/bandwidth can be more variable.
+    PG_NOTE = ("Note: inter-node (EFA) nodes ran WITHOUT a cluster placement group "
+               "(Spot default) —\ninter-node latency/bandwidth may be higher/more variable "
+               "than a placement-grouped pair.")
+
+    def _stamp(fig, series_on_fig):
+        if inter_no_pg and any(s.get("scope") == "inter" for s in series_on_fig):
+            fig.text(0.5, 0.005, PG_NOTE, ha="center", va="bottom", fontsize=7,
+                     color="dimgray", wrap=True)
 
     # One figure per direction (unidirectional / bidirectional) so the CUDA-aware vs
     # host baseline contrast is clean and the y-scale isn't dominated by one mode.
@@ -278,7 +298,8 @@ def main(argv=None):
         ax.grid(True, which="both", ls=":", alpha=0.5)
         ax.legend(fontsize=8)
         out = os.path.join(args.out_dir, f"p2p_bandwidth_{test}.png")
-        fig.tight_layout()
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+        _stamp(fig, group + extra)
         fig.savefig(out, dpi=130)
         print(f"wrote {out}")
 
@@ -307,7 +328,8 @@ def main(argv=None):
         ax.grid(True, which="both", ls=":", alpha=0.5)
         ax.legend(fontsize=8)
         out = os.path.join(args.out_dir, "p2p_bandwidth_overlay.png")
-        fig.tight_layout()
+        fig.tight_layout(rect=(0, 0.04, 1, 1))
+        _stamp(fig, overlay)
         fig.savefig(out, dpi=130)
         print(f"wrote {out}")
 

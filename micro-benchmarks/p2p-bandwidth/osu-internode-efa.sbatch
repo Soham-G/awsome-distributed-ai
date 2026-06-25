@@ -71,8 +71,25 @@ echo "Buffers    : ${BUFFER_TYPE}  (D=device/GPUDirect-RDMA, H=host)"
 echo "FI_PROVIDER: ${FI_PROVIDER}  FI_EFA_USE_DEVICE_RDMA=${FI_EFA_USE_DEVICE_RDMA}"
 command -v mpirun >/dev/null || { echo "ERROR: mpirun not found"; exit 1; }
 echo "mpirun     : $(mpirun --version 2>/dev/null | head -1)"
-# Show the two hostnames so it's clear traffic is inter-node.
-srun -l hostname || true
+
+# --- Placement annotation (self-documents the .out file) ---
+# Spot nodes launch WITHOUT a cluster placement group (the add-cng templates create a PG
+# only for On-Demand). EFA still works without one, but inter-node latency can be higher
+# and bandwidth more variable than a placement-grouped pair. Record each node's hostname,
+# lifecycle (spot/on-demand) and placement group so the result carries the caveat.
+echo "-------------------- node placement annotation --------------------"
+srun -l bash -c '
+  T=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+  H="X-aws-ec2-metadata-token: $T"
+  PG=$(curl -sf -H "$H" http://169.254.169.254/latest/meta-data/placement/group-name 2>/dev/null) || PG=""
+  [ -z "$PG" ] && PG="(none)"
+  LC=$(curl -sf -H "$H" http://169.254.169.254/latest/meta-data/instance-life-cycle 2>/dev/null) || LC="?"
+  AZ=$(curl -sf -H "$H" http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null) || AZ="?"
+  echo "node=$(hostname) lifecycle=$LC placement_group=$PG az=$AZ"
+' || true
+echo "ANNOTATION: inter-node EFA P2P. If placement_group=(none) above (the Spot default),"
+echo "inter-node latency may be higher / bandwidth more variable than a placement-grouped"
+echo "On-Demand pair. EFA itself does not require a placement group."
 
 ###########################
 ######### Build ###########

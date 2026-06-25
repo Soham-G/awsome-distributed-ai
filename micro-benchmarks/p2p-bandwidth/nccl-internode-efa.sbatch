@@ -47,7 +47,24 @@ echo "Nodes    : ${SLURM_JOB_NUM_NODES:-?} (${SLURM_JOB_NODELIST:-?})"
 echo "Slurm    : ${SLURM_JOB_ID:-NA} / ${SLURM_JOB_PARTITION:-NA}"
 echo "Image    : ${IMAGE}"
 echo "Sweep    : ${BEGIN_BYTES}..${END_BYTES} bytes (x${STEP_FACTOR})"
-srun -l hostname || true   # show the two distinct nodes
+
+# --- Placement annotation (self-documents the .out file) ---
+# Spot nodes launch WITHOUT a cluster placement group (the add-cng templates create a PG
+# only for On-Demand). EFA still works without one, but inter-node latency can be higher
+# and bandwidth more variable than a placement-grouped pair.
+echo "-------------------- node placement annotation --------------------"
+srun -l bash -c '
+  T=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+  H="X-aws-ec2-metadata-token: $T"
+  PG=$(curl -sf -H "$H" http://169.254.169.254/latest/meta-data/placement/group-name 2>/dev/null) || PG=""
+  [ -z "$PG" ] && PG="(none)"
+  LC=$(curl -sf -H "$H" http://169.254.169.254/latest/meta-data/instance-life-cycle 2>/dev/null) || LC="?"
+  AZ=$(curl -sf -H "$H" http://169.254.169.254/latest/meta-data/placement/availability-zone 2>/dev/null) || AZ="?"
+  echo "node=$(hostname) lifecycle=$LC placement_group=$PG az=$AZ"
+' || true
+echo "ANNOTATION: inter-node EFA P2P. If placement_group=(none) above (the Spot default),"
+echo "inter-node latency may be higher / bandwidth more variable than a placement-grouped"
+echo "On-Demand pair. EFA itself does not require a placement group."
 
 # EFA transport for NCCL inter-node. NCCL_P2P intra-node is irrelevant here (1 GPU/node);
 # the inter-node path goes through the AWS OFI NCCL plugin over EFA.
