@@ -30,6 +30,10 @@ set -euo pipefail
 : "${OSU_VERSION:=7.5}"                          # OSU Micro-Benchmarks release
 # GPU pairs to test, space-separated "a:b". 0:1 is an NVSwitch-near pair; 0:7 a far pair.
 : "${GPU_PAIRS:=0:1 0:7}"
+# Max message size in BYTES for the sweep. Empty = OSU's built-in default (up to 4 MiB).
+# Set e.g. MAX_BYTES=268435456 (256 MiB) to push past the default into the bandwidth
+# plateau. OSU sweeps powers of two from 1 byte up to this max.
+: "${MAX_BYTES:=}"
 
 OMPI="${OMPI:-/opt/amazon/openmpi5}"             # OpenMPI 5 (NOT the default 4.1.x)
 
@@ -139,6 +143,10 @@ exec "${bin}" -d cuda D D "$@"
 WRAP
 chmod +x "${WRAPPER}"
 
+# Optional max-message-size flag for the sweep (empty = OSU default).
+OSU_MAX_ARGS=()
+[[ -n "${MAX_BYTES}" ]] && OSU_MAX_ARGS=(-m "${MAX_BYTES}")
+
 run_pair () {
     local a="$1" b="$2" bin="$3" label="$4"
     echo
@@ -146,7 +154,7 @@ run_pair () {
     # 2 ranks on this one node; bind to cores to keep the host copy threads off each other.
     mpirun -np 2 --map-by ppr:2:node --bind-to core \
         -x PATH -x LD_LIBRARY_PATH -x HOME \
-        "${WRAPPER}" "${a}" "${b}" "${bin}"
+        "${WRAPPER}" "${a}" "${b}" "${bin}" "${OSU_MAX_ARGS[@]}"
 }
 
 ###########################
