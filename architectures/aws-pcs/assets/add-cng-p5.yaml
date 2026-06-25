@@ -20,15 +20,18 @@
 # layout doesn't match this template's block can't be selected.
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Adding Compute Node Group to PCS Cluster with multi-network interface support for P5 series (On-Demand or Capacity Block)
+Description: Adding Compute Node Group to PCS Cluster with multi-network interface support for P5 series (On-Demand, Spot, or Capacity Block)
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label:
-          default: Capacity Blocks for ML Settings (Optional)
+          default: Capacity / purchasing options
         Parameters:
+          - PurchaseOption
+          - SpotAllocationStrategy
           - CapacityReservationId
+          - UsePlacementGroup
       - Label:
           default: Additional Compute Node Group Settings
         Parameters:
@@ -62,14 +65,57 @@ Metadata:
           - PostInstallScriptArgs
 
 Parameters:
+  PurchaseOption:
+    Type: String
+    Description: >-
+      How EC2 instances are purchased for this node group. ONDEMAND (default) uses
+      On-Demand capacity in a cluster placement group. SPOT uses interruptible Spot
+      capacity (no placement group; see SpotAllocationStrategy) — cheaper but the
+      instances can be reclaimed at any time. CAPACITY_BLOCK launches against a
+      Capacity Block for ML reservation (set CapacityReservationId).
+    Default: ONDEMAND
+    AllowedValues:
+      - ONDEMAND
+      - SPOT
+      - CAPACITY_BLOCK
+
+  SpotAllocationStrategy:
+    Type: String
+    Description: >-
+      EC2 Spot allocation strategy AWS PCS uses when PurchaseOption=SPOT. Ignored
+      for ONDEMAND / CAPACITY_BLOCK. price-capacity-optimized (default) balances
+      lowest price with the deepest, least-interrupted pools (recommended).
+    Default: price-capacity-optimized
+    AllowedValues:
+      - lowest-price
+      - capacity-optimized
+      - price-capacity-optimized
+
+  UsePlacementGroup:
+    Type: String
+    Description: >-
+      Launch On-Demand nodes into a cluster placement group (lowest inter-node
+      latency for tightly-coupled multi-node jobs). 'true' (default) preserves the
+      original behavior. A cluster placement group requires all instances to land in
+      one tight physical group, which can trigger InsufficientInstanceCapacity (ICE)
+      for scarce GPU types even when the AZ has capacity — so set 'false' to
+      relax placement and improve On-Demand launch success (recommended for
+      single-node jobs, or when you hit ICE). No effect on Spot or Capacity Block,
+      which never use a placement group here.
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
   CapacityReservationId:
     Type: String
     Description: >-
-      (Optional) Capacity Block for ML reservation ID. When SET, the node group
-      launches with MarketType=capacity-block against this reservation. Leave
-      EMPTY for On-Demand. NOTE: this is for Capacity Blocks ONLY — do not put an
-      On-Demand Capacity Reservation (ODCR) ID here. An ODCR with "open" matching
-      is consumed automatically by On-Demand launches, so for ODCR leave this empty.
+      (Optional) Capacity Block for ML reservation ID. Used only when
+      PurchaseOption=CAPACITY_BLOCK; the node group then launches with
+      MarketType=capacity-block against this reservation. Leave EMPTY for On-Demand
+      / Spot. NOTE: this is for Capacity Blocks ONLY — do not put an On-Demand
+      Capacity Reservation (ODCR) ID here. An ODCR with "open" matching is consumed
+      automatically by On-Demand launches, so for ODCR leave this empty.
     Default: ""
 
   ClusterId:
@@ -260,8 +306,17 @@ Conditions:
   # network cards, p5.48xlarge / p5e.48xlarge have 32. So "use 32 interfaces"
   # means "not p5en". No separate NetworkInterfaceCount parameter is needed.
   Use32Interfaces: !Not [!Equals [!Ref InstanceType, "p5en.48xlarge"]]
-  UseCapacityBlock: !Not [!Equals [!Ref CapacityReservationId, ""]]
-  UseOnDemand: !Equals [!Ref CapacityReservationId, ""]
+  # Purchasing mode is driven by PurchaseOption (single source of truth), not by
+  # whether CapacityReservationId happens to be set.
+  UseCapacityBlock: !Equals [!Ref PurchaseOption, 'CAPACITY_BLOCK']
+  UseSpot: !Equals [!Ref PurchaseOption, 'SPOT']
+  UseOnDemand: !Equals [!Ref PurchaseOption, 'ONDEMAND']
+  # A cluster placement group is created only for On-Demand AND when not disabled.
+  # Relaxing it (UsePlacementGroup=false) can avoid InsufficientInstanceCapacity for
+  # scarce GPU types. Spot/Capacity Block never use a placement group here.
+  CreatePlacementGroup: !And
+    - !Condition UseOnDemand
+    - !Equals [!Ref UsePlacementGroup, 'true']
   CreateQueue: !Not [!Equals [!Ref QueueName, ""]]
   # Emit the monitoring-role tag for both login and compute nodes (any role
   # other than 'none'). The monitoring stack identifies login nodes by this
@@ -272,10 +327,10 @@ Conditions:
 
 Resources:
 
-  # Cluster Placement Group (On-Demand only)
+  # Cluster Placement Group (On-Demand only, and only when not disabled)
   PlacementGroup:
     Type: AWS::EC2::PlacementGroup
-    Condition: UseOnDemand
+    Condition: CreatePlacementGroup
     Properties:
       Strategy: cluster
 
@@ -303,7 +358,13 @@ Resources:
         - '{{resolve:ssm:/aws/service/pcs/ami/dlami-base-ubuntu2404/x86_64/latest/ami-id}}'
       InstanceConfigs:
         - InstanceType: !Ref InstanceType
-      PurchaseOption: !If [UseCapacityBlock, CAPACITY_BLOCK, !Ref "AWS::NoValue"]
+      PurchaseOption: !Ref PurchaseOption
+      # Spot allocation strategy applies only when PurchaseOption=SPOT; PCS rejects
+      # SpotOptions for the other purchasing modes, so omit it otherwise.
+      SpotOptions: !If
+        - UseSpot
+        - AllocationStrategy: !Ref SpotAllocationStrategy
+        - !Ref "AWS::NoValue"
 
   PCSQueueCompute:
     Type: AWS::PCS::Queue
@@ -337,7 +398,7 @@ Resources:
               CapacityReservationId: !Ref CapacityReservationId
           - !Ref AWS::NoValue
         Placement: !If
-          - UseOnDemand
+          - CreatePlacementGroup
           - GroupName: !Ref PlacementGroup
           - !Ref AWS::NoValue
         TagSpecifications:

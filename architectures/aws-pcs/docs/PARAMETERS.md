@@ -67,6 +67,18 @@ See [GPU compute](../README.md#gpu-compute-p5p6) for instance/EFA/capacity guida
 | `PseriesCngName` | `gpu-p5` | GPU node-group name |
 | `PseriesQueueName` | `gpu-p5` | GPU Slurm queue name |
 
+> **Spot P5/P6 — use the standalone template.** deploy-all's P-series path is On-Demand /
+> ODCR / Capacity Block only (it does not pass a purchasing mode to the P5 child stack).
+> For an interruptible **Spot** P5/P6 queue, deploy [`add-cng-p5.yaml`](../assets/add-cng-p5.yaml)
+> as its own CNG stack against the running cluster (see [README Example 4](../README.md#example-4-multi-nic-gpu-spot-queue-p5en)).
+> That template exposes three purchasing parameters (matching the `add-cng-g7e*.yaml` templates):
+>
+> | Parameter | Default | Purpose |
+> |---|---|---|
+> | `PurchaseOption` | `ONDEMAND` | `ONDEMAND` / `SPOT` / `CAPACITY_BLOCK`. Single source of truth for the node group's purchasing mode |
+> | `SpotAllocationStrategy` | `price-capacity-optimized` | EC2 Spot allocation strategy when `PurchaseOption=SPOT` (`lowest-price` / `capacity-optimized` / `price-capacity-optimized`). Ignored otherwise |
+> | `UsePlacementGroup` | `true` | Whether On-Demand nodes launch into an auto-created cluster placement group. Set `false` to relax placement and avoid `InsufficientInstanceCapacity` for scarce GPU types. No effect on Spot / Capacity Block (which never use one) |
+
 ## 5. Additional Cluster Configuration (Monitoring, Multi-User, Container Runtime)
 
 | Parameter | Default | Purpose |

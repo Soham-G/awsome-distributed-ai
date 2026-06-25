@@ -184,12 +184,20 @@ automatically.
 **Capacity options:**
 - **On-Demand**: leave `CapacityReservationId` empty.
 - **On-Demand Capacity Reservation (ODCR)**: also leave `CapacityReservationId` **empty** — create the ODCR with **"open"** instance matching and it is consumed automatically by the node group's On-Demand launches. (Do **not** put the ODCR ID in `CapacityReservationId`; that parameter forces Capacity-Block mode.)
+- **Spot**: the standalone `add-cng-p5.yaml` template accepts `PurchaseOption=SPOT` for interruptible Spot capacity (cheaper, but instances can be reclaimed at any time). `SpotAllocationStrategy` (default `price-capacity-optimized`) tunes pool selection, and no placement group is created on Spot. See [Example 4](#example-4-multi-nic-gpu-spot-queue-p5en).
 - **Capacity Blocks for ML**: set `CapacityReservationId` to the Capacity Block ID. The template then launches with `MarketType=capacity-block` against it.
 
 > **Capacity Block billing:** a block bills for its whole reserved window once it
 > starts and cannot be stopped early. When the block is active, run the GPU node
 > group at `PseriesMinCount = PseriesMaxCount = <reserved count>` so the reserved
 > nodes launch immediately, rather than scaling from 0.
+
+> **Spot is a standalone-template option for P5.** `PurchaseOption=SPOT` is exposed by
+> the standalone `add-cng-p5.yaml` (and the `add-cng-g7e*.yaml` templates), so a Spot
+> P5/P6 queue is added as its own CNG stack against an existing cluster — see
+> [Example 4](#example-4-multi-nic-gpu-spot-queue-p5en). The all-in-one
+> `pcs-ml-cluster-deploy-all.yaml` P-series path deploys On-Demand / ODCR / Capacity
+> Block only; it does not pass `PurchaseOption` down to the P5 child stack.
 
 Storage (FSx for Lustre `/fsx` + OpenZFS `/home`) has sensible defaults; deployment
 types, throughput, and capacity are covered in [§8.1 Storage](#81-storage-fsx-deployment-types--sizing).
@@ -269,6 +277,50 @@ group. For other HPC types, set `OnDemandInstanceType` and the matching
 `OnDemandEfaInterfaceCount` from the table in
 [EFA on CPU HPC instances](#efa-on-cpu-hpc-instances-ondemandefainterfacecount)
 (hpc6a = `1`; hpc7a/hpc6id/hpc8a = `2`).
+
+### Example 4: Multi-NIC GPU Spot queue (P5en)
+
+Add a **Spot** P5/P6 queue to an **already-running** cluster by deploying the standalone
+`add-cng-p5.yaml` as its own CNG stack (the all-in-one `pcs-ml-cluster-deploy-all.yaml`
+P-series path is On-Demand / ODCR / Capacity Block only). Set `PurchaseOption=SPOT`;
+`SpotAllocationStrategy` defaults to `price-capacity-optimized` and no placement group is
+created for Spot. Pull the cluster-identifying values from your deployed cluster's stack
+outputs (or `aws pcs get-cluster` / `get-compute-node-group`):
+
+```bash
+CLUSTER_ID=pcs_xxxxxxxxxx          # aws pcs list-clusters
+SUBNET_ID=subnet-xxxxxxxxxxxxxxxxx # cluster's private compute subnet
+SG_ID=sg-xxxxxxxxxxxxxxxxx         # cluster security group
+INSTANCE_PROFILE_ARN=arn:aws:iam::<account>:instance-profile/AWSPCS-...
+
+aws cloudformation create-stack \
+  --stack-name pcs-add-cng-p5en-spot \
+  --template-body file://architectures/aws-pcs/assets/add-cng-p5.yaml \
+  --parameters \
+    ParameterKey=ClusterId,ParameterValue=${CLUSTER_ID} \
+    ParameterKey=ClusterName,ParameterValue=<your-cluster-name> \
+    ParameterKey=CngName,ParameterValue=gpu-p5en-spot \
+    ParameterKey=QueueName,ParameterValue=gpu-p5en-spot \
+    ParameterKey=InstanceType,ParameterValue=p5en.48xlarge \
+    ParameterKey=PurchaseOption,ParameterValue=SPOT \
+    ParameterKey=SpotAllocationStrategy,ParameterValue=price-capacity-optimized \
+    ParameterKey=MinCount,ParameterValue=0 \
+    ParameterKey=MaxCount,ParameterValue=2 \
+    ParameterKey=SubnetId,ParameterValue=${SUBNET_ID} \
+    ParameterKey=ClusterSecurityGroupId,ParameterValue=${SG_ID} \
+    ParameterKey=IamProfileArn,ParameterValue=${INSTANCE_PROFILE_ARN} \
+    ParameterKey=FSxLustreFilesystemId,ParameterValue=<fs-lustre> \
+    ParameterKey=FSxLustreFilesystemMountName,ParameterValue=<mount> \
+    ParameterKey=FSxOpenZFSFilesystemId,ParameterValue=<fs-openzfs> \
+    ParameterKey=SlurmVersion,ParameterValue=25.11 \
+    ParameterKey=S3BucketName,ParameterValue=<your-templates-bucket>
+```
+
+Adds a `gpu-p5en-spot` Slurm partition backed by Spot `p5en.48xlarge` nodes that scale
+0→2 on demand. The same pattern works for `p5.48xlarge` / `p5e.48xlarge` — just change
+`InstanceType`. `MinCount=0` means no instances launch (and nothing is billed) until a
+job is submitted to the queue, so stack creation never depends on Spot capacity being
+available; capacity is evaluated only when the queue scales up.
 
 ---
 
@@ -647,7 +699,7 @@ parameter and default, see [PARAMETERS.md](./docs/PARAMETERS.md).
 | [`ml-cluster-prerequisites.yaml`](./assets/ml-cluster-prerequisites.yaml) | VPC, subnets, security groups, FSx for Lustre + OpenZFS | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/ml-cluster-prerequisites.yaml&stackName=pcs-prerequisites) |
 | [`cluster.yaml`](./assets/cluster.yaml) | PCS cluster core (Slurm scheduler only, no nodes) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/cluster.yaml&stackName=pcs-cluster) |
 | [`add-cng.yaml`](./assets/add-cng.yaml) | Compute node group — login nodes, CPU / single-NIC-GPU queues (C6i, G5, G6); switches to a multi-NIC EFA `NetworkInterfaces` block when `EfaInterfaceCount > 0` (HPC types: hpc6a/hpc7a/hpc6id/hpc8a …) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng.yaml&stackName=pcs-add-cng) |
-| [`add-cng-p5.yaml`](./assets/add-cng-p5.yaml) | P5/P5e/P5en nodes (16/32 EFA interfaces, by type) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p5.yaml&stackName=pcs-add-cng-p5) |
+| [`add-cng-p5.yaml`](./assets/add-cng-p5.yaml) | P5/P5e/P5en nodes (16/32 EFA interfaces, by type); On-Demand, Spot, or Capacity Block via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p5.yaml&stackName=pcs-add-cng-p5) |
 | [`add-cng-p6-b200.yaml`](./assets/add-cng-p6-b200.yaml) | P6-B200 nodes (8 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p6-b200.yaml&stackName=pcs-add-cng-p6-b200) |
 | [`add-cng-p6-b300.yaml`](./assets/add-cng-p6-b300.yaml) | P6-B300 nodes (17 interfaces: 16 EFA + 1 ENA) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p6-b300.yaml&stackName=pcs-add-cng-p6-b300) |
 | [`add-cng-g7e.yaml`](./assets/add-cng-g7e.yaml) | g7e.48xlarge nodes (4 EFA interfaces); On-Demand or Spot via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e.yaml&stackName=pcs-add-cng-g7e) |
