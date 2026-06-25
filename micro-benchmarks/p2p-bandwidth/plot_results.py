@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: MIT-0
 """Parse the p2p-bandwidth benchmark outputs and plot bandwidth vs message size.
 
-Consumes the .out files produced by the three benchmarks in this directory:
+Consumes the .out files produced by the benchmarks in this directory:
 
   * osu-p2p-mpi.sbatch          -> CUDA-aware MPI, DEVICE buffers (D D), per GPU pair
   * osu-p2p-mpi-hostbuf.sbatch  -> non-CUDA-aware MPI, HOST buffers (H H), baseline
+  * nccl-sendrecv.sbatch        -> NCCL sendrecv_perf sweep (busbw), 2 GPUs
   * p2p-bandwidth.sbatch        -> NVIDIA p2pBandwidthLatencyTest (matrix, optional)
 
 Each OSU section is a block like:
@@ -97,6 +98,33 @@ def _mk_label(s):
     return f"{mode} {kind}{pair}"
 
 
+# nccl-tests data row: "size count type redop root time algbw busbw error ..." for
+# out-of-place plus the same for in-place. Columns vary, but the first field is the
+# byte size and busbw is the 2nd-to-last numeric on each of the two halves. We key off
+# the leading integer size and pull the standard nccl-tests layout:
+#   size(B) count(elem) type redop root  time algbw busbw #wrong  time algbw busbw #wrong
+_NCCL_ROW = re.compile(r"^\s*(\d+)\s+\d+\s+\S+\s+\S+\s+\S+\s+"
+                       r"[\d.]+\s+[\d.]+\s+([\d.]+)\s+\S+")
+
+
+def parse_nccl(path):
+    """Parse nccl-tests sendrecv_perf output -> one series of (size, busbw GB/s).
+
+    nccl-tests already reports busbw in GB/s (base-2-ish, but directly comparable to the
+    other GB/s numbers within a few %). Returns [] if the file isn't an nccl-tests run."""
+    sizes, gbps = [], []
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            m = _NCCL_ROW.match(line)
+            if m:
+                sizes.append(int(m.group(1)))
+                gbps.append(float(m.group(2)))  # out-of-place busbw, already GB/s
+    if not sizes:
+        return []
+    return [{"test": "nccl", "mode": "nccl", "pair": None, "sizes": sizes,
+             "gbps": gbps, "label": "NCCL sendrecv (busbw)"}]
+
+
 def parse_nvidia_peaks(path):
     """Extract peak per-pair bandwidth from the NVIDIA p2pBandwidthLatencyTest matrices.
 
@@ -123,12 +151,18 @@ def parse_nvidia_peaks(path):
     return peaks
 
 
+def _scope_of(path):
+    """intra-node (NVLink) vs inter-node (EFA), inferred from the filename."""
+    base = os.path.basename(path).lower()
+    return "inter" if "internode" in base else "intra"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+", help="benchmark .out files")
     ap.add_argument("--out-dir", default=".", help="directory for PNG output")
-    ap.add_argument("--title", default="Intra-node GPU P2P bandwidth (p5en, 8x H200)")
+    ap.add_argument("--title", default="GPU P2P bandwidth (p5en, 8x H200)")
     args = ap.parse_args(argv)
 
     try:
@@ -139,6 +173,7 @@ def main(argv=None):
         sys.exit("matplotlib is required: pip install matplotlib")
 
     osu_series = []
+    nccl_series = []
     nvidia_peaks = {}
     for path in args.files:
         if not os.path.exists(path):
@@ -147,41 +182,59 @@ def main(argv=None):
         # Classify by content. Use a SPECIFIC marker that only the real NVIDIA matrix
         # output contains — the "P2P=Enabled ... Bandwidth ... Matrix" header line —
         # not the tool name "p2pBandwidthLatencyTest", which also appears in the OSU
-        # scripts' prose footer and would misclassify an OSU run. An OSU run is
-        # recognized by its "# OSU ... Bandwidth Test" banner. A file can satisfy
-        # both (build logs etc.), so prefer whichever parser actually yields data.
+        # scripts' prose footer and would misclassify an OSU run. OSU runs are
+        # recognized by their "# OSU ... Bandwidth Test" banner, NCCL by its data rows.
+        # A file can satisfy several markers (build logs etc.), so prefer whichever
+        # parser actually yields data.
         with open(path, errors="replace") as fh:
             body = fh.read()
         is_nvidia = re.search(r"P2P=Enabled.*Bandwidth.*Matrix", body) is not None
+        scope = _scope_of(path)
         osu_found = parse_osu(path)
+        nccl_found = parse_nccl(path) if "busbw" in body else []
+        for s in osu_found + nccl_found:
+            s["scope"] = scope
+            net = "NVLink" if scope == "intra" else "EFA"
+            s["label"] = f"{s['label']} [{net}]"
         if osu_found:
             osu_series += osu_found
-            print(f"{path}: parsed {len(osu_found)} OSU series")
+            print(f"{path}: parsed {len(osu_found)} OSU series ({scope}-node)")
+        elif nccl_found:
+            nccl_series += nccl_found
+            print(f"{path}: parsed NCCL series ({len(nccl_found[0]['sizes'])} sizes, {scope}-node)")
         elif is_nvidia:
             nvidia_peaks = parse_nvidia_peaks(path) or nvidia_peaks
             print(f"{path}: NVIDIA peaks {nvidia_peaks}")
         else:
             print(f"{path}: no recognizable benchmark data")
 
-    if not osu_series and not nvidia_peaks:
+    if not osu_series and not nccl_series and not nvidia_peaks:
         sys.exit("no parseable benchmark data found in the given files")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
     # One figure per direction (unidirectional / bidirectional) so the CUDA-aware vs
     # host baseline contrast is clean and the y-scale isn't dominated by one mode.
+    # NCCL sendrecv (a point-to-point send/recv) is plotted on the unidirectional figure
+    # alongside the OSU osu_bw curves.
     for kind, test in (("Unidirectional", "osu_bw"), ("Bidirectional", "osu_bibw")):
         group = [s for s in osu_series if s["test"] == test]
-        if not group:
+        extra = nccl_series if test == "osu_bw" else []
+        if not group and not extra:
             continue
         fig, ax = plt.subplots(figsize=(9, 6))
         for s in sorted(group, key=lambda x: (x["mode"] != "device", x["label"])):
             style = "-o" if s["mode"] == "device" else "--s"
             ax.plot(s["sizes"], s["gbps"], style, markersize=4, label=s["label"])
+        for s in extra:
+            ax.plot(s["sizes"], s["gbps"], "-^", markersize=4, color="purple",
+                    label=s["label"])
         peak = nvidia_peaks.get("unidir" if test == "osu_bw" else "bidir")
         if peak:
+            # The NVIDIA tool transfers a single 160 MB buffer (numElems=40M ints), so
+            # this is a large-message reference point, not a sweep — label it as such.
             ax.axhline(peak, color="black", ls=":", lw=1.2,
-                       label=f"NVIDIA cudaMemcpyPeer peak ~{peak:.0f} GB/s")
+                       label=f"NVIDIA cudaMemcpyPeer @160MB ~{peak:.0f} GB/s")
         ax.set_xscale("log", base=2)
         ax.set_xlabel("Message size (bytes)")
         ax.set_ylabel("Bandwidth (GB/s)")
@@ -189,6 +242,34 @@ def main(argv=None):
         ax.grid(True, which="both", ls=":", alpha=0.5)
         ax.legend(fontsize=8)
         out = os.path.join(args.out_dir, f"p2p_bandwidth_{test}.png")
+        fig.tight_layout()
+        fig.savefig(out, dpi=130)
+        print(f"wrote {out}")
+
+    # Overlay: every unidirectional-style curve (OSU osu_bw + NCCL sendrecv), both
+    # scopes, on one log-log chart so intra-node NVLink vs inter-node EFA is directly
+    # comparable. Only emit it when more than one scope is present.
+    overlay = [s for s in osu_series if s["test"] == "osu_bw"] + list(nccl_series)
+    scopes = {s.get("scope", "intra") for s in overlay}
+    if overlay and len(scopes) > 1:
+        fig, ax = plt.subplots(figsize=(10, 6.5))
+        for s in sorted(overlay, key=lambda x: (x.get("scope") != "intra", x["label"])):
+            intra = s.get("scope", "intra") == "intra"
+            ax.plot(s["sizes"], s["gbps"], "-o" if intra else "--^",
+                    markersize=4, label=s["label"])
+        for k, lbl in (("unidir", "NVIDIA cudaMemcpyPeer @160MB (NVLink)"),):
+            if nvidia_peaks.get(k):
+                ax.axhline(nvidia_peaks[k], color="black", ls=":", lw=1.2,
+                           label=f"{lbl} ~{nvidia_peaks[k]:.0f} GB/s")
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")           # log-y: NVLink and EFA differ by ~10x
+        ax.set_xlabel("Message size (bytes)")
+        ax.set_ylabel("Bandwidth (GB/s, log)")
+        ax.set_title(f"{args.title}\nIntra-node (NVLink) vs inter-node (EFA) — "
+                     "unidirectional P2P")
+        ax.grid(True, which="both", ls=":", alpha=0.5)
+        ax.legend(fontsize=8)
+        out = os.path.join(args.out_dir, "p2p_bandwidth_overlay.png")
         fig.tight_layout()
         fig.savefig(out, dpi=130)
         print(f"wrote {out}")

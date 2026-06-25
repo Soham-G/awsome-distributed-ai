@@ -1,22 +1,35 @@
-# Intra-node GPU Peer-to-Peer Bandwidth
+# GPU Peer-to-Peer Bandwidth (intra-node NVLink & inter-node EFA)
 
-Two complementary single-node benchmarks for the **intra-node GPU↔GPU peer-to-peer**
-path (NVLink / NVSwitch) on a GPU compute node — e.g. a `p5en.48xlarge` (8× H200) queue:
+Benchmarks for GPU↔GPU peer-to-peer bandwidth, both **intra-node** (over NVLink /
+NVSwitch, on one GPU node) and **inter-node** (over EFA, between two nodes) — e.g. on a
+`p5en.48xlarge` (8× H200) queue. Run several tools over the same links to see the
+hardware ceiling, what CUDA-aware MPI delivers, the non-CUDA-aware fallback, and what
+NCCL (what real training uses) achieves.
+
+**Intra-node (NVLink):**
 
 | Script | Tool | What it measures |
 |---|---|---|
-| [`p2p-bandwidth.sbatch`](./p2p-bandwidth.sbatch) | NVIDIA [`p2pBandwidthLatencyTest`](https://github.com/NVIDIA/cuda-samples) | Raw `cudaMemcpyPeer` bandwidth + latency matrices for **every** GPU pair, P2P enabled vs disabled |
-| [`osu-p2p-mpi.sbatch`](./osu-p2p-mpi.sbatch) | **OpenMPI 5** + [OSU Micro-Benchmarks](https://mvapich.cse.ohio-state.edu/benchmarks/) (`osu_bw`, `osu_bibw`) | **CUDA-aware** MPI point-to-point bandwidth over NVLink, with device buffers (`D D`) |
-| [`osu-p2p-mpi-hostbuf.sbatch`](./osu-p2p-mpi-hostbuf.sbatch) | OpenMPI 5 + OSU (`osu_bw`, `osu_bibw`) | **Non-CUDA-aware** baseline: the same OSU tests with host buffers (`H H`), CPU↔CPU only (no NVLink) |
+| [`p2p-bandwidth.sbatch`](./p2p-bandwidth.sbatch) | NVIDIA [`p2pBandwidthLatencyTest`](https://github.com/NVIDIA/cuda-samples) | Raw `cudaMemcpyPeer` bandwidth + latency matrices for **every** GPU pair (single 160 MB transfer). The hardware ceiling. |
+| [`osu-p2p-mpi.sbatch`](./osu-p2p-mpi.sbatch) | **OpenMPI 5** + [OSU](https://mvapich.cse.ohio-state.edu/benchmarks/) (`osu_bw`, `osu_bibw`) | **CUDA-aware** MPI point-to-point over NVLink, device buffers (`D D`) |
+| [`osu-p2p-mpi-hostbuf.sbatch`](./osu-p2p-mpi-hostbuf.sbatch) | OpenMPI 5 + OSU | **Non-CUDA-aware** baseline: same tests, host buffers (`H H`), CPU↔CPU only |
+| [`nccl-sendrecv.sbatch`](./nccl-sendrecv.sbatch) | [nccl-tests](https://github.com/NVIDIA/nccl-tests) `sendrecv_perf` (Pyxis container) | **NCCL** point-to-point over NVLink, message-size sweep (busbw) |
 
-Run all three to compare the hardware ceiling (NVIDIA tool), what CUDA-aware MPI
-delivers on those links (OSU `D D`), and the non-CUDA-aware fallback (OSU `H H`) — see
-[Comparing the results](#comparing-the-results). [`plot_results.py`](./plot_results.py)
-turns the `.out` files into bandwidth-vs-message-size charts.
+**Inter-node (EFA):**
 
-> **Scope:** this is *intra-node* P2P (GPU↔GPU inside one node over NVLink). For
-> *multi-node* GPU communication over EFA, use the
-> [NCCL tests](../nccl-tests/) instead.
+| Script | Tool | What it measures |
+|---|---|---|
+| [`osu-internode-efa.sbatch`](./osu-internode-efa.sbatch) | OpenMPI 5 + OSU, 2 nodes | MPI point-to-point **over EFA** between 2 nodes; `D D` uses GPUDirect RDMA, `H H` is host↔host |
+| [`nccl-internode-efa.sbatch`](./nccl-internode-efa.sbatch) | nccl-tests `sendrecv_perf`, 2 nodes (Pyxis) | **NCCL over EFA** between 2 nodes — the path real multi-node training uses |
+
+[`plot_results.py`](./plot_results.py) turns all the `.out` files into
+bandwidth-vs-message-size charts, including an intra-vs-inter (NVLink vs EFA) overlay —
+see [Plotting](#plotting) and [Comparing the results](#comparing-the-results).
+
+> **Related:** for full multi-node collective benchmarks (all-reduce at scale over EFA),
+> see the [NCCL tests](../nccl-tests/). The inter-node scripts here are deliberately
+> minimal (single GPU pair) for an apples-to-apples P2P comparison with the intra-node
+> numbers.
 
 ## Prerequisites
 
@@ -49,7 +62,24 @@ sbatch --export=ALL,MAX_BYTES=268435456 -p gpu-p5en-spot osu-p2p-mpi-hostbuf.sba
 
 Output lands next to where you submit, as `<job-name>_<jobid>.out` (plus matching
 `.err`). The first run builds the tools (~1–3 min); subsequent runs reuse the cache
-under `/fsx/p2p-bandwidth` (all three scripts share one OSU build).
+under `/fsx/p2p-bandwidth` (all OSU scripts share one OSU build; both NCCL scripts share
+one cached `.sqsh`).
+
+### Running the full matrix
+
+[`run-all.sh`](./run-all.sh) submits every benchmark in order (intra-node first, then the
+2-node EFA jobs) with the 256 MiB sweep, from the login node:
+
+```bash
+cd /fsx && bash run-all.sh gpu-p5en-spot     # arg = partition; defaults to gpu-p5en-spot
+```
+
+The inter-node jobs need **2 nodes available at once** — on a Spot queue that depends on
+capacity (they queue until two `p5en` instances launch). After everything completes, plot:
+
+```bash
+python3 plot_results.py --out-dir plots *_*.out
+```
 
 ### Plotting
 
@@ -120,6 +150,24 @@ ceiling (NVIDIA tool) because of UCX/MPI protocol and staging overhead — that 
 expected — but **far above** the host (`H H`) baseline, which is bounded by CPU/shared-
 memory bandwidth and never uses NVLink. Measured on a p5en (8× H200), large-message
 unidirectional: NVIDIA ~393 GB/s, CUDA-aware MPI ~311 GB/s, host baseline ~8 GB/s — so
-CUDA awareness is ~**37×** over the host path here. If the OSU device-buffer run *fails*
-but the NVIDIA test looks healthy, the issue is MPI CUDA-awareness/config, not the GPUs
-or NVLink. All report GB/s base-10, comparable to within a few percent.
+CUDA awareness is ~**37×** over the host path here. **NCCL** (`nccl-sendrecv.sbatch`)
+typically sits between the raw peer-copy and CUDA-aware MPI. If the OSU device-buffer run
+*fails* but the NVIDIA test looks healthy, the issue is MPI CUDA-awareness/config, not the
+GPUs or NVLink. All report GB/s base-10, comparable to within a few percent.
+
+### Intra-node (NVLink) vs inter-node (EFA)
+
+The inter-node scripts measure the **same point-to-point pattern across the network over
+EFA** instead of within the node over NVLink. Expect inter-node bandwidth to plateau
+**well below** intra-node — a single GPU-pair over one EFA path is an order of magnitude
+under NVLink/NVSwitch — which is exactly why training keeps as much traffic intra-node as
+possible. Things to look for:
+
+- **OSU `D D` over EFA** uses **GPUDirect RDMA** (NIC DMAs GPU memory directly); the
+  `H H` variant is plain host↔host EFA — the gap between them is the GPUDirect benefit.
+- **NCCL over EFA** must show `NET/OFI Selected provider is efa ... (found N nics)` in
+  the `NCCL_DEBUG` log; if it falls back to TCP sockets, bandwidth drops sharply.
+- The plotter's `p2p_bandwidth_overlay.png` puts NVLink and EFA curves on one **log-y**
+  chart so the ~10× gap is visible at a glance (only emitted when both scopes are present).
+- A single pair drives one "rail"; full inter-node bandwidth needs all 8 GPUs
+  (multi-rail) — see the [NCCL tests](../nccl-tests/) for the at-scale all-reduce.
