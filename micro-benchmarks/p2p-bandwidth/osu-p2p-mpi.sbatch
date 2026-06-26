@@ -127,9 +127,17 @@ echo "osu_bibw : ${OSU_BIBW}"
 ###### GPU pinning ########
 ###########################
 
-# Per-rank wrapper: rank 0 -> first GPU of the pair, rank 1 -> second. We expose exactly
-# those two GPUs (so device id 0/1 inside the app map to the chosen physical GPUs) and let
-# OpenMPI's CUDA path move data GPU<->GPU directly over NVLink.
+# Per-rank wrapper pins each rank to a DISTINCT physical GPU so the D D transfer is a
+# real GPU<->GPU NVLink copy.
+#
+# WHY NOT reorder CUDA_VISIBLE_DEVICES per rank: OSU selects its device as
+# (local_rank % visible_device_count), NOT "the first visible device". If we expose only
+# 2 GPUs, both ranks compute an index into a 2-GPU list and — because we reordered the
+# list per rank — BOTH land on the SAME physical GPU. That turns the test into an
+# intra-GPU HBM copy (~1.9 TB/s, ~4x over a single H200's ~478 GB/s NVLink ceiling) — a
+# bogus "P2P" number. Instead, expose ALL GPUs unchanged and pin each rank explicitly to
+# the requested physical GPU via CUDA_VISIBLE_DEVICES = a single device, so OSU's
+# local_rank%1 == 0 -> that one device. rank 0 -> gpuA, rank 1 -> gpuB (two real GPUs).
 WRAPPER="${BUILD_ROOT}/osu_pair_wrapper.sh"
 cat > "${WRAPPER}" <<'WRAP'
 #!/bin/bash
@@ -138,9 +146,10 @@ cat > "${WRAPPER}" <<'WRAP'
 # the buffer types LAST, after -d cuda and any extra options like -m <max>.
 gpuA="$1"; gpuB="$2"; bin="$3"; shift 3
 lr="${OMPI_COMM_WORLD_LOCAL_RANK:-0}"
-if [[ "${lr}" == "0" ]]; then export CUDA_VISIBLE_DEVICES="${gpuA},${gpuB}";
-else                          export CUDA_VISIBLE_DEVICES="${gpuB},${gpuA}"; fi
-# Each rank uses its first visible device; "$@" are options, then D D (device buffers).
+# Expose exactly ONE physical GPU to each rank: rank 0 sees only gpuA, rank 1 only gpuB.
+# With a single visible device, OSU's local_rank%1=0 maps to it — no same-GPU collision.
+if [[ "${lr}" == "0" ]]; then export CUDA_VISIBLE_DEVICES="${gpuA}";
+else                          export CUDA_VISIBLE_DEVICES="${gpuB}"; fi
 exec "${bin}" -d cuda "$@" D D
 WRAP
 chmod +x "${WRAPPER}"
