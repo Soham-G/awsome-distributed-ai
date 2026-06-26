@@ -134,7 +134,7 @@ run () {
         -x PATH -x LD_LIBRARY_PATH -x HOME \
         -x FI_PROVIDER -x FI_EFA_USE_DEVICE_RDMA -x FI_EFA_FORK_SAFE \
         -x CUDA_VISIBLE_DEVICES=0 \
-        "${bin}" "${DEV_ARGS[@]}" "${BUF_SEND}" "${BUF_RECV}" -m "${MAX_BYTES}"
+        "${bin}" "${DEV_ARGS[@]}" -m "${MAX_BYTES}" "${BUF_SEND}" "${BUF_RECV}"
 }
 
 echo

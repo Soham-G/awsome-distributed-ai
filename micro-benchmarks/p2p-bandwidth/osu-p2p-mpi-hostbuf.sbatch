@@ -139,7 +139,7 @@ run_host () {
     # separate cores. No -d cuda, no CUDA_VISIBLE_DEVICES — pure CPU-memory transfer.
     mpirun -np 2 --map-by ppr:2:node --bind-to core \
         -x PATH -x LD_LIBRARY_PATH -x HOME \
-        "${bin}" H H "${OSU_MAX_ARGS[@]}"
+        "${bin}" "${OSU_MAX_ARGS[@]}" H H
 }
 
 echo

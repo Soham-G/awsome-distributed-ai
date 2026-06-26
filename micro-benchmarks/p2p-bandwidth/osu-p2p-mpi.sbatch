@@ -133,13 +133,15 @@ echo "osu_bibw : ${OSU_BIBW}"
 WRAPPER="${BUILD_ROOT}/osu_pair_wrapper.sh"
 cat > "${WRAPPER}" <<'WRAP'
 #!/bin/bash
-# args: <gpuA> <gpuB> <osu_binary> [extra osu args...]
+# args: <gpuA> <gpuB> <osu_binary> [extra osu OPTION args...]
+# IMPORTANT: OSU wants all options BEFORE the "SRC DST" positionals (D D), so we append
+# the buffer types LAST, after -d cuda and any extra options like -m <max>.
 gpuA="$1"; gpuB="$2"; bin="$3"; shift 3
 lr="${OMPI_COMM_WORLD_LOCAL_RANK:-0}"
 if [[ "${lr}" == "0" ]]; then export CUDA_VISIBLE_DEVICES="${gpuA},${gpuB}";
 else                          export CUDA_VISIBLE_DEVICES="${gpuB},${gpuA}"; fi
-# Each rank uses its first visible device (-d cuda + "D D" = device send/recv buffers).
-exec "${bin}" -d cuda D D "$@"
+# Each rank uses its first visible device; "$@" are options, then D D (device buffers).
+exec "${bin}" -d cuda "$@" D D
 WRAP
 chmod +x "${WRAPPER}"
 
