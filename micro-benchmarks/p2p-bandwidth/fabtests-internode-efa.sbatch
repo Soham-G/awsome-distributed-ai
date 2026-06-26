@@ -129,20 +129,35 @@ echo "Server node: ${SERVER}   Client node: ${CLIENT}"
 DEV_ARGS=()
 [[ "${BUF}" == "cuda" ]] && DEV_ARGS=(-D cuda)
 
+# EFA is not IP-addressable, so the server/client must exchange their EFA addresses
+# out-of-band first. fabtests does this with -b[=<port>] (OOB address exchange AND
+# synchronization, over a TCP socket); the client reaches the server's OOB socket via the
+# <host> positional. Without it, the client's fi_getinfo(<hostname>) returns -FI_ENODATA
+# (ret=-61). The bulk transfer itself still rides EFA.
+#
+# Use the server's IP (not the Slurm nodename) for the OOB positional — the bare nodename
+# may not resolve from the client (getaddrinfo: Resource temporarily unavailable).
+OOB_PORT="${OOB_PORT:-9228}"
+SERVER_IP=$(srun --nodes=1 --ntasks=1 --nodelist="${SERVER}" \
+            bash -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '[:space:]')
+[[ -n "${SERVER_IP}" ]] || { echo "ERROR: could not resolve server IP for ${SERVER}"; exit 1; }
+echo "OOB address exchange (-b=${OOB_PORT}) via server ${SERVER} (${SERVER_IP})"
+
 echo
 echo "==================== fabtests fi_rdm_tagged_bw over EFA (BUF=${BUF}) ===================="
 
-# One invocation, full size ladder (-S all). Start the server on node 0 (binds and
-# waits for the client), give it a moment, then run the client on node 1 pointed at the
-# server hostname. The CLIENT prints the per-size bandwidth table that we parse/plot.
+# One invocation, full size ladder (-S all). Server binds the OOB port (-b=<port>),
+# client connects to the server's OOB socket (-b=<port> <server_host>) for the EFA
+# address handshake, then EFA carries the data. The CLIENT prints the per-size bandwidth
+# table that we parse/plot.
 status=0
 srun --nodes=1 --ntasks=1 --nodelist="${SERVER}" \
-     "${FT_BW}" -p efa "${DEV_ARGS[@]}" -I "${ITERS}" -S all \
+     "${FT_BW}" -p efa -b="${OOB_PORT}" "${DEV_ARGS[@]}" -I "${ITERS}" -S all \
      > "/tmp/ft_srv_${SLURM_JOB_ID}.log" 2>&1 &
 srv_pid=$!
 sleep 5
 srun --nodes=1 --ntasks=1 --nodelist="${CLIENT}" \
-     "${FT_BW}" -p efa "${DEV_ARGS[@]}" -I "${ITERS}" -S all "${SERVER}" \
+     "${FT_BW}" -p efa -b="${OOB_PORT}" "${DEV_ARGS[@]}" -I "${ITERS}" -S all "${SERVER_IP}" \
      || status=$?
 wait "${srv_pid}" 2>/dev/null || true
 
