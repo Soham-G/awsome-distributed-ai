@@ -269,6 +269,28 @@ def main(argv=None):
             fig.text(0.5, 0.005, PG_NOTE, ha="center", va="bottom", fontsize=7,
                      color="dimgray", wrap=True)
 
+    # Style every series uniquely so the legend is unambiguous:
+    #   * marker encodes the TOOL  (OSU device = o, OSU host = s, NCCL = ^, fabtests = D)
+    #   * linestyle encodes the SCOPE (solid = intra/NVLink, dashed = inter/EFA)
+    #   * color is assigned explicitly per series (matplotlib's tab10 cycle), so two
+    #     series can never collapse to the same color+marker+linestyle in the legend.
+    _CYCLE = plt.rcParams["axes.prop_cycle"].by_key().get(
+        "color", ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"])
+
+    def _marker(s):
+        if s["test"] == "nccl":     return "^"
+        if s["test"] == "fabtests": return "D"
+        return "o" if s["mode"] == "device" else "s"   # OSU device vs host
+
+    def _linestyle(s):
+        return "-" if s.get("scope", "intra") == "intra" else "--"
+
+    def _plot_series(ax, series):
+        # Stable order (intra before inter, then by label) and a distinct color each.
+        for i, s in enumerate(sorted(series, key=lambda x: (x.get("scope") != "intra", x["label"]))):
+            ax.plot(s["sizes"], s["gbps"], marker=_marker(s), linestyle=_linestyle(s),
+                    color=_CYCLE[i % len(_CYCLE)], markersize=4, label=s["label"])
+
     # One figure per direction (unidirectional / bidirectional) so the CUDA-aware vs
     # host baseline contrast is clean and the y-scale isn't dominated by one mode.
     # NCCL sendrecv (a point-to-point send/recv) is plotted on the unidirectional figure
@@ -279,12 +301,7 @@ def main(argv=None):
         if not group and not extra:
             continue
         fig, ax = plt.subplots(figsize=(9, 6))
-        for s in sorted(group, key=lambda x: (x["mode"] != "device", x["label"])):
-            style = "-o" if s["mode"] == "device" else "--s"
-            ax.plot(s["sizes"], s["gbps"], style, markersize=4, label=s["label"])
-        for s in extra:
-            ax.plot(s["sizes"], s["gbps"], "-^", markersize=4, color="purple",
-                    label=s["label"])
+        _plot_series(ax, group + extra)
         peak = nvidia_peaks.get("unidir" if test == "osu_bw" else "bidir")
         if peak:
             # The NVIDIA tool transfers a single 160 MB buffer (numElems=40M ints), so
@@ -311,10 +328,7 @@ def main(argv=None):
     scopes = {s.get("scope", "intra") for s in overlay}
     if overlay and len(scopes) > 1:
         fig, ax = plt.subplots(figsize=(10, 6.5))
-        for s in sorted(overlay, key=lambda x: (x.get("scope") != "intra", x["label"])):
-            intra = s.get("scope", "intra") == "intra"
-            ax.plot(s["sizes"], s["gbps"], "-o" if intra else "--^",
-                    markersize=4, label=s["label"])
+        _plot_series(ax, overlay)   # same unique tool-marker / scope-linestyle scheme
         for k, lbl in (("unidir", "NVIDIA cudaMemcpyPeer @160MB (NVLink)"),):
             if nvidia_peaks.get(k):
                 ax.axhline(nvidia_peaks[k], color="black", ls=":", lw=1.2,
