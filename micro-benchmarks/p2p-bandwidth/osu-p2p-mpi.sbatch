@@ -35,7 +35,22 @@ set -euo pipefail
 # plateau. OSU sweeps powers of two from 1 byte up to this max.
 : "${MAX_BYTES:=}"
 
-OMPI="${OMPI:-/opt/amazon/openmpi5}"             # OpenMPI 5 (NOT the default 4.1.x)
+# MPI transport to exercise (which OpenMPI build + MCA path):
+#   cm-ofi  (default) — EFA-bundled /opt/amazon/openmpi5, PML cm + MTL ofi (libfabric).
+#                       This is what OpenMPI picks by default on EFA (mtl_ofi prio 25 >
+#                       ob1 prio 20). Intra-node it still rides NVLink via the OFI shm/CUDA path.
+#   ob1-ofi           — same OpenMPI, but force PML ob1 + BTL ofi,smcuda,sm,self. MPI does
+#                       the tag-matching; libfabric/shm is just byte transport.
+#   ucx               — a SEPARATELY BUILT UCX-enabled OpenMPI (build-ucx-stack.sh). Intra
+#                       -node UCX uses the cuda_ipc transport over NVLink. (Intra-node ONLY:
+#                       EFA is not a verbs device here, so UCX can't do inter-node EFA.)
+: "${MPI_TRANSPORT:=cm-ofi}"
+
+# UCX stack locations (only used when MPI_TRANSPORT=ucx; built by build-ucx-stack.sh).
+: "${UCX_VERSION:=1.18.0}"
+: "${OMPI_UCX_VERSION:=5.0.6}"
+
+OMPI="${OMPI:-/opt/amazon/openmpi5}"             # default: EFA-bundled OpenMPI 5
 
 # Build OSU against a CUDA *12* toolkit. CUDA 13 changed the cudaMemPrefetchAsync()
 # signature (3rd arg is now `struct cudaMemLocation`, not an int device id), which
@@ -48,6 +63,30 @@ if [[ -z "${CUDA_HOME:-}" ]]; then
     done
     CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"     # last resort: default symlink
 fi
+# --- Transport selection: pick the OpenMPI build, OSU install, and MCA flags ---
+MCA_ARGS=()
+case "${MPI_TRANSPORT}" in
+    cm-ofi)
+        # Default EFA OpenMPI; let it auto-select (PML cm + MTL ofi). No MCA override.
+        OSU_PREFIX="${BUILD_ROOT}/osu-install-${OSU_VERSION}"
+        ;;
+    ob1-ofi)
+        # Same OpenMPI, force the OB1 + BTL path (ofi for net, smcuda/sm for intra-node).
+        MCA_ARGS=(--mca pml ob1 --mca btl ofi,smcuda,sm,self)
+        OSU_PREFIX="${BUILD_ROOT}/osu-install-${OSU_VERSION}"
+        ;;
+    ucx)
+        # Separately built UCX-enabled OpenMPI + its own OSU (build-ucx-stack.sh).
+        OMPI="${BUILD_ROOT}/openmpi-ucx-${OMPI_UCX_VERSION}"
+        OSU_PREFIX="${BUILD_ROOT}/osu-install-${OSU_VERSION}-ucx"
+        MCA_ARGS=(--mca pml ucx)
+        export LD_LIBRARY_PATH="${BUILD_ROOT}/ucx-install-${UCX_VERSION}/lib:${LD_LIBRARY_PATH:-}"
+        ;;
+    *)
+        echo "ERROR: unknown MPI_TRANSPORT='${MPI_TRANSPORT}' (use cm-ofi|ob1-ofi|ucx)"; exit 1
+        ;;
+esac
+
 export PATH="${OMPI}/bin:${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${OMPI}/lib:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 # OpenMPI 5 errors out ("Unable to get the user home directory") when HOME is unset.
@@ -55,7 +94,6 @@ export HOME="${HOME:-/tmp}"
 
 OSU_SRC="osu-micro-benchmarks-${OSU_VERSION}"
 OSU_TGZ_URL="https://mvapich.cse.ohio-state.edu/download/mvapich/${OSU_SRC}.tar.gz"
-OSU_PREFIX="${BUILD_ROOT}/osu-install-${OSU_VERSION}"
 
 ###########################
 ####### Preflight #########
@@ -66,7 +104,13 @@ echo "Date         : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "Host         : $(hostname)"
 echo "Instance ID  : $(cat /sys/devices/virtual/dmi/id/board_asset_tag 2>/dev/null | tr -d ' ' || echo unknown)"
 echo "Slurm job    : ${SLURM_JOB_ID:-NA} / ${SLURM_JOB_PARTITION:-NA}"
+echo "MPI_TRANSPORT: ${MPI_TRANSPORT}   (mca: ${MCA_ARGS[*]:-<default>})"
 echo "OpenMPI      : ${OMPI}"
+
+# For the UCX transport the OpenMPI + OSU must have been pre-built by build-ucx-stack.sh.
+if [[ "${MPI_TRANSPORT}" == "ucx" && ! -x "${OMPI}/bin/mpirun" ]]; then
+    echo "ERROR: UCX OpenMPI not found at ${OMPI}. Run build-ucx-stack.sh first."; exit 1
+fi
 
 command -v mpicc   >/dev/null 2>&1 || { echo "ERROR: mpicc not found under ${OMPI}/bin"; exit 1; }
 command -v mpirun  >/dev/null 2>&1 || { echo "ERROR: mpirun not found under ${OMPI}/bin"; exit 1; }
@@ -88,6 +132,10 @@ find_osu_bin () { find "${OSU_PREFIX}" -name "$1" -type f 2>/dev/null | head -1;
 
 OSU_BW="$(find_osu_bin osu_bw || true)"
 OSU_BIBW="$(find_osu_bin osu_bibw || true)"
+
+if [[ "${MPI_TRANSPORT}" == "ucx" && ( ! -x "${OSU_BW:-/nonexistent}" || ! -x "${OSU_BIBW:-/nonexistent}" ) ]]; then
+    echo "ERROR: UCX OSU not found under ${OSU_PREFIX}. Run build-ucx-stack.sh first."; exit 1
+fi
 
 if [[ "${FORCE_REBUILD}" != "1" && -x "${OSU_BW:-/nonexistent}" && -x "${OSU_BIBW:-/nonexistent}" ]]; then
     echo
@@ -161,9 +209,11 @@ OSU_MAX_ARGS=()
 run_pair () {
     local a="$1" b="$2" bin="$3" label="$4"
     echo
-    echo "-------------------- ${label}: GPU ${a} <-> GPU ${b} --------------------"
+    echo "-------------------- ${label} [${MPI_TRANSPORT}]: GPU ${a} <-> GPU ${b} --------------------"
     # 2 ranks on this one node; bind to cores to keep the host copy threads off each other.
+    # MCA_ARGS forces the transport (empty for cm-ofi default).
     mpirun -np 2 --map-by ppr:2:node --bind-to core \
+        "${MCA_ARGS[@]}" \
         -x PATH -x LD_LIBRARY_PATH -x HOME \
         "${WRAPPER}" "${a}" "${b}" "${bin}" "${OSU_MAX_ARGS[@]}"
 }

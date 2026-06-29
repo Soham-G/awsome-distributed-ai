@@ -46,6 +46,9 @@ _ROW = re.compile(r"^\s*(\d+)\s+([0-9]+\.[0-9]+)\s*$")
 #   "------ osu_bibw (bidirectional, host buffers) [H H] ------"
 _HDR = re.compile(r"osu_(bw|bibw)\b(.*)", re.IGNORECASE)
 _PAIR = re.compile(r"GPU\s+(\d+)\s*<->\s*GPU\s+(\d+)")
+# Transport tag the sbatch scripts put in the section header, e.g. "[ob1-ofi]" / "[ucx]".
+# (cm-ofi is the default; older outputs without a tag are treated as cm-ofi.)
+_XPORT = re.compile(r"\[(cm-ofi|ob1-ofi|ucx)\]")
 # OSU's own banner tells us the buffer mode reliably: "MPI-CUDA" => device buffers.
 _BANNER = re.compile(r"#\s*OSU\s+MPI(-CUDA)?\s+(Bi-Directional\s+)?Bandwidth", re.IGNORECASE)
 
@@ -56,6 +59,7 @@ def parse_osu(path):
     cur = None
     pending_pair = None
     pending_test = None
+    pending_xport = None
     with open(path, errors="replace") as fh:
         for line in fh:
             hdr = _HDR.search(line)
@@ -64,6 +68,8 @@ def parse_osu(path):
                 pending_test = "osu_" + hdr.group(1).lower()
                 m = _PAIR.search(line)
                 pending_pair = f"{m.group(1)}-{m.group(2)}" if m else None
+                x = _XPORT.search(line)
+                pending_xport = x.group(1) if x else None
                 cur = None
                 continue
             ban = _BANNER.search(line)
@@ -75,6 +81,7 @@ def parse_osu(path):
                     "test": test,
                     "mode": mode,
                     "pair": pending_pair,
+                    "xport": pending_xport,
                     "sizes": [],
                     "gbps": [],
                 }
@@ -92,7 +99,12 @@ def parse_osu(path):
 
 
 def _mk_label(s):
-    mode = "CUDA-aware (D D)" if s["mode"] == "device" else "host baseline (H H)"
+    if s["mode"] == "device":
+        # Name the MPI transport so cm-ofi / ob1-ofi / ucx are distinct series.
+        xport = s.get("xport") or "cm-ofi"
+        mode = f"MPI/{xport} (D D)"
+    else:
+        mode = "host baseline (H H)"
     kind = "bidir" if s["test"] == "osu_bibw" else "unidir"
     pair = f" GPU {s['pair']}" if s["pair"] else ""
     return f"{mode} {kind}{pair}"
@@ -280,7 +292,9 @@ def main(argv=None):
     def _marker(s):
         if s["test"] == "nccl":     return "^"
         if s["test"] == "fabtests": return "D"
-        return "o" if s["mode"] == "device" else "s"   # OSU device vs host
+        if s["mode"] != "device":   return "s"          # OSU host baseline
+        # OSU device: distinct marker per MPI transport.
+        return {"cm-ofi": "o", "ob1-ofi": "v", "ucx": "P"}.get(s.get("xport") or "cm-ofi", "o")
 
     def _linestyle(s):
         return "-" if s.get("scope", "intra") == "intra" else "--"

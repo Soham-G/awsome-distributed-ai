@@ -36,6 +36,10 @@ set -euo pipefail
 : "${OSU_VERSION:=7.5}"
 : "${MAX_BYTES:=268435456}"                      # 256 MiB sweep (EFA needs large msgs to peak)
 : "${BUFFER_TYPE:=D D}"                          # "D D" device (GPUDirect RDMA) / "H H" host
+# Inter-node MPI transport: cm-ofi (default, PML cm + MTL ofi) or ob1-ofi (PML ob1 + BTL
+# ofi). Both ride EFA via libfabric. UCX is NOT available for inter-node here (EFA is not
+# a verbs device), so only the two OFI paths are valid across nodes.
+: "${MPI_TRANSPORT:=cm-ofi}"
 
 OMPI="${OMPI:-/opt/amazon/openmpi5}"
 # CUDA 12 toolkit (CUDA 13 broke OSU's cudaMemPrefetchAsync; see osu-p2p-mpi.sbatch).
@@ -48,6 +52,14 @@ fi
 export PATH="${OMPI}/bin:${CUDA_HOME}/bin:${PATH}"
 export LD_LIBRARY_PATH="${OMPI}/lib:${CUDA_HOME}/lib64:/opt/amazon/efa/lib:${LD_LIBRARY_PATH:-}"
 export HOME="${HOME:-/tmp}"
+
+# Transport MCA flags (cm-ofi = default auto-select; ob1-ofi = force PML ob1 + BTL ofi).
+MCA_ARGS=()
+case "${MPI_TRANSPORT}" in
+    cm-ofi)  ;;                                                    # default, no override
+    ob1-ofi) MCA_ARGS=(--mca pml ob1 --mca btl ofi,self) ;;
+    *) echo "ERROR: inter-node supports cm-ofi|ob1-ofi only (got '${MPI_TRANSPORT}')"; exit 1 ;;
+esac
 
 # EFA transport.
 export FI_PROVIDER=efa
@@ -128,9 +140,11 @@ DEV_ARGS=()
 run () {
     local bin="$1" label="$2"
     echo
-    echo "-------------------- ${label} [${BUF_SEND} ${BUF_RECV}] over EFA --------------------"
+    echo "-------------------- ${label} [${BUF_SEND} ${BUF_RECV}] [${MPI_TRANSPORT}] over EFA --------------------"
     # 2 ranks, one per node (PCS/Slurm places them); each rank uses GPU 0 on its node.
+    # MCA_ARGS forces the transport (empty for cm-ofi default).
     mpirun -np 2 --map-by ppr:1:node --bind-to none \
+        "${MCA_ARGS[@]}" \
         -x PATH -x LD_LIBRARY_PATH -x HOME \
         -x FI_PROVIDER -x FI_EFA_USE_DEVICE_RDMA -x FI_EFA_FORK_SAFE \
         -x CUDA_VISIBLE_DEVICES=0 \

@@ -11,9 +11,10 @@ NCCL (what real training uses) achieves.
 | Script | Tool | What it measures |
 |---|---|---|
 | [`p2p-bandwidth.sbatch`](./p2p-bandwidth.sbatch) | NVIDIA [`p2pBandwidthLatencyTest`](https://github.com/NVIDIA/cuda-samples) | Raw `cudaMemcpyPeer` bandwidth + latency matrices for **every** GPU pair (single 160 MB transfer). The hardware ceiling. |
-| [`osu-p2p-mpi.sbatch`](./osu-p2p-mpi.sbatch) | **OpenMPI 5** + [OSU](https://mvapich.cse.ohio-state.edu/benchmarks/) (`osu_bw`, `osu_bibw`) | **CUDA-aware** MPI point-to-point over NVLink, device buffers (`D D`) |
+| [`osu-p2p-mpi.sbatch`](./osu-p2p-mpi.sbatch) | **OpenMPI 5** + [OSU](https://mvapich.cse.ohio-state.edu/benchmarks/) (`osu_bw`, `osu_bibw`) | **CUDA-aware** MPI point-to-point over NVLink, device buffers (`D D`). `MPI_TRANSPORT` selects the transport: `cm-ofi` (default), `ob1-ofi`, or `ucx` — see [MPI transports](#mpi-transports) |
 | [`osu-p2p-mpi-hostbuf.sbatch`](./osu-p2p-mpi-hostbuf.sbatch) | OpenMPI 5 + OSU | **Non-CUDA-aware** baseline: same tests, host buffers (`H H`), CPU↔CPU only |
 | [`nccl-sendrecv.sbatch`](./nccl-sendrecv.sbatch) | [nccl-tests](https://github.com/NVIDIA/nccl-tests) `sendrecv_perf` (Pyxis container) | **NCCL** point-to-point over NVLink, message-size sweep (busbw) |
+| [`build-ucx-stack.sh`](./build-ucx-stack.sh) | builds UCX + UCX-OpenMPI + OSU | one-time build (no GPU needed) enabling `MPI_TRANSPORT=ucx` for the intra-node UCX comparison |
 
 **Inter-node (EFA):**
 
@@ -176,3 +177,33 @@ possible. Things to look for:
   chart so the ~10× gap is visible at a glance (only emitted when both scopes are present).
 - A single pair drives one "rail"; full inter-node bandwidth needs all 8 GPUs
   (multi-rail) — see the [NCCL tests](../nccl-tests/) for the at-scale all-reduce.
+
+## MPI transports
+
+The EFA-bundled OpenMPI at `/opt/amazon/openmpi5` is built **`--with-libfabric` and has
+no UCX** — so by default MPI rides **OFI (libfabric)**, not UCX. `osu-p2p-mpi.sbatch` and
+`osu-internode-efa.sbatch` expose `MPI_TRANSPORT` to compare the available paths:
+
+| `MPI_TRANSPORT` | MPI stack | Path | Scope |
+|---|---|---|---|
+| `cm-ofi` *(default)* | `/opt/amazon/openmpi5` | PML `cm` + MTL `ofi` (libfabric). What OpenMPI auto-selects on EFA (`mtl_ofi` prio 25 > `ob1` 20) | intra + inter |
+| `ob1-ofi` | `/opt/amazon/openmpi5` | PML `ob1` + BTL `ofi`/`smcuda` — MPI does tag-matching, libfabric/shm is byte transport | intra + inter |
+| `ucx` | UCX-OpenMPI built by [`build-ucx-stack.sh`](./build-ucx-stack.sh) | PML `ucx` → `cuda_ipc` over NVLink | **intra only** |
+
+```bash
+# default OFI path (cm + mtl/ofi) — already the baseline
+sbatch --export=ALL,MAX_BYTES=268435456 -p gpu-p5en-spot osu-p2p-mpi.sbatch
+# the other OFI path
+sbatch --export=ALL,MAX_BYTES=268435456,MPI_TRANSPORT=ob1-ofi -p gpu-p5en-spot osu-p2p-mpi.sbatch
+# UCX (build the stack once first; ~30-40 min on the 2-core login node)
+bash build-ucx-stack.sh
+sbatch --export=ALL,MAX_BYTES=268435456,MPI_TRANSPORT=ucx -p gpu-p5en-spot osu-p2p-mpi.sbatch
+```
+
+> **Why UCX is intra-node only here.** UCX's RDMA transports need a verbs/RDMA device,
+> but on these nodes **`/sys/class/infiniband` is empty** — EFA is exposed through
+> libfabric's `efa` provider, not verbs (this is exactly why AWS ships OpenMPI OFI-only).
+> So UCX can't drive EFA inter-node; it would fall back to TCP over ENA. **Intra-node**,
+> however, UCX uses its `cuda_ipc` transport over NVLink — a valid third datapoint
+> alongside the two OFI paths and NCCL. The plotter labels each as `MPI/<transport>` with
+> a distinct marker, so all three are separable in the legend.
