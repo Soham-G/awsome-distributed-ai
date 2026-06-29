@@ -323,8 +323,13 @@ def main(argv=None):
             ax.axhline(peak, color="black", ls=":", lw=1.2,
                        label=f"NVIDIA cudaMemcpyPeer @160MB ~{peak:.0f} GB/s")
         ax.set_xscale("log", base=2)
+        # Log-y too: bandwidth spans ~6 orders of magnitude (sub-1 KB messages are
+        # latency-bound at <0.01 GB/s, large messages plateau at hundreds of GB/s). On a
+        # linear y-axis the small-message region is crushed to a flat line near zero,
+        # which hides exactly where the transports differ most (small/mid messages).
+        ax.set_yscale("log")
         ax.set_xlabel("Message size (bytes)")
-        ax.set_ylabel("Bandwidth (GB/s)")
+        ax.set_ylabel("Bandwidth (GB/s, log)")
         ax.set_title(f"{args.title}\n{kind} P2P bandwidth vs message size")
         ax.grid(True, which="both", ls=":", alpha=0.5)
         ax.legend(fontsize=8)
