@@ -80,6 +80,10 @@ case "${MPI_TRANSPORT}" in
         OMPI="${BUILD_ROOT}/openmpi-ucx-${OMPI_UCX_VERSION}"
         OSU_PREFIX="${BUILD_ROOT}/osu-install-${OSU_VERSION}-ucx"
         MCA_ARGS=(--mca pml ucx)
+        # OPAL_PREFIX is REQUIRED so this OpenMPI loads its OWN plugins (incl. the ucx
+        # PML) and not the system /opt/amazon/openmpi's — without it ompi_info/mpirun
+        # resolve against the wrong install and 'pml ucx' is missing.
+        export OPAL_PREFIX="${OMPI}"
         export LD_LIBRARY_PATH="${BUILD_ROOT}/ucx-install-${UCX_VERSION}/lib:${LD_LIBRARY_PATH:-}"
         ;;
     *)
@@ -214,7 +218,7 @@ run_pair () {
     # MCA_ARGS forces the transport (empty for cm-ofi default).
     mpirun -np 2 --map-by ppr:2:node --bind-to core \
         "${MCA_ARGS[@]}" \
-        -x PATH -x LD_LIBRARY_PATH -x HOME \
+        -x PATH -x LD_LIBRARY_PATH -x HOME ${OPAL_PREFIX:+-x OPAL_PREFIX} \
         "${WRAPPER}" "${a}" "${b}" "${bin}" "${OSU_MAX_ARGS[@]}"
 }
 
