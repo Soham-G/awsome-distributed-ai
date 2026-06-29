@@ -299,6 +299,30 @@ def main(argv=None):
     def _linestyle(s):
         return "-" if s.get("scope", "intra") == "intra" else "--"
 
+    def _human_bytes(n, _pos=None):
+        # Label log-2 x ticks as human-readable byte sizes (1 B, 64 KB, 1 MB, 256 MB)
+        # instead of 2^20 etc. Uses binary units (KiB-scale), shown as KB/MB/GB for brevity.
+        n = float(n)
+        for unit, size in (("GB", 2**30), ("MB", 2**20), ("KB", 2**10)):
+            if n >= size:
+                v = n / size
+                return f"{v:.0f} {unit}" if v == int(v) else f"{v:.1f} {unit}"
+        return f"{int(n)} B"
+
+    def _fmt_xaxis(ax):
+        import matplotlib.ticker as mticker
+        # Label every OTHER power of two as a byte size (1 B, 4 B, ... 1 KB, ... 1 MB, ...
+        # 256 MB) — ~15 labels across the range, readable without crowding. Minor ticks
+        # mark the intervening powers of two (no label).
+        ax.xaxis.set_major_locator(mticker.LogLocator(base=2, subs=(1.0,), numticks=64))
+        import math
+        ax.xaxis.set_major_formatter(mticker.FuncFormatter(
+            lambda n, p: _human_bytes(n) if n > 0 and int(round(math.log2(n))) % 2 == 0 else ""))
+        ax.xaxis.set_minor_locator(mticker.NullLocator())
+        for lbl in ax.get_xticklabels():
+            lbl.set_rotation(45)
+            lbl.set_ha("right")
+
     def _plot_series(ax, series):
         # Stable order (intra before inter, then by label) and a distinct color each.
         for i, s in enumerate(sorted(series, key=lambda x: (x.get("scope") != "intra", x["label"]))):
@@ -328,7 +352,8 @@ def main(argv=None):
         # linear y-axis the small-message region is crushed to a flat line near zero,
         # which hides exactly where the transports differ most (small/mid messages).
         ax.set_yscale("log")
-        ax.set_xlabel("Message size (bytes)")
+        _fmt_xaxis(ax)
+        ax.set_xlabel("Message size")
         ax.set_ylabel("Bandwidth (GB/s, log)")
         ax.set_title(f"{args.title}\n{kind} P2P bandwidth vs message size")
         ax.grid(True, which="both", ls=":", alpha=0.5)
@@ -354,7 +379,8 @@ def main(argv=None):
                            label=f"{lbl} ~{nvidia_peaks[k]:.0f} GB/s")
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")           # log-y: NVLink and EFA differ by ~10x
-        ax.set_xlabel("Message size (bytes)")
+        _fmt_xaxis(ax)
+        ax.set_xlabel("Message size")
         ax.set_ylabel("Bandwidth (GB/s, log)")
         ax.set_title(f"{args.title}\nIntra-node (NVLink) vs inter-node (EFA) — "
                      "unidirectional P2P")
