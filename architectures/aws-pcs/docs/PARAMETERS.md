@@ -39,6 +39,7 @@ it directly.
 | `SSHAccessCidr` | *(empty)* | When set to a CIDR, opens SSH/22 on the login node to that CIDR via a login-only security group (attached to the login node only, never compute). Empty (default) = SSH over SSM only. Set to your office/VPN range for direct `ssh`/`scp`/VS Code Remote (common for multi-user clusters) |
 | `ManagedAccounting` | `disabled` | Enable Slurm managed accounting (requires Slurm 24.11+) |
 | `AccountingPolicyEnforcement` | `none` | Slurm accounting policy enforcement (`none` or `associations,limits,safe`) |
+| `GpuHealthCheck` | `none` | `prolog` wires the repo's [GPU health-check suite](../../../4.validation_and_observability/2.gpu-cluster-healthcheck) in as a cluster-wide Slurm **Prolog**: before each job it runs fast checks (nvidia-smi + EFA enumeration, ~8s) and **drains the node + requeues the job** if a GPU/EFA fault is detected. The prolog is GPU-aware (no-ops on CPU/login nodes), so it is safe on mixed clusters. The suite is installed to `/opt/aws/pcs/gpu-healthcheck` on the GPU compute node group at first boot (from `s3://<bucket>/<prefix>gpu-healthcheck/gpu-healthcheck.tar.gz`, so that object must be present in your templates bucket). PCS supports `Prolog` only at the cluster level, hence the GPU-aware self-scoping rather than a per-node-group setting. See [OPERATIONS.md §GPU health-check prolog](./OPERATIONS.md). |
 
 ## 3. On-Demand Compute Node Group (CPU)
 

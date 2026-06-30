@@ -21,6 +21,7 @@ Metadata:
           - ManagedAccounting
           - AccountingPolicyEnforcement
           - DeployMonitoring
+          - GpuHealthCheck
       - Label:
           default: PCS Networking configuration
         Parameters:
@@ -75,6 +76,21 @@ Parameters:
       - 'true'
       - 'false'
 
+  GpuHealthCheck:
+    Type: String
+    Description: >-
+      Enable the GPU health-check Slurm prolog. 'prolog' sets a cluster-wide Slurm
+      Prolog (Prolog + PrologFlags=Alloc) that runs fast GPU/EFA checks
+      (nvidia-smi + EFA enumeration, ~8s) before each job; a failure drains the node
+      and requeues the job. The prolog is GPU-aware and no-ops on non-GPU (CPU/login)
+      nodes, so it is safe on mixed clusters. Requires the health-check suite installed
+      on GPU compute nodes (set the matching GpuHealthCheck on add-cng*; the node
+      UserData fetches it to /opt/aws/pcs/gpu-healthcheck). 'none' (default) disables it.
+    Default: 'none'
+    AllowedValues:
+      - 'none'
+      - 'prolog'
+
 Conditions:
   GovCloud: !Equals [!Ref AWS::Partition, 'aws-us-gov']
   China: !Equals [!Ref AWS::Partition, 'aws-cn']
@@ -90,6 +106,10 @@ Conditions:
   # so only emit them when monitoring is enabled AND the version supports it.
   IsSlurm2511OrLater: !Equals [!Ref SlurmVersion, "25.11"]
   IncludeMetricsConfig: !And [!Condition IsMonitoringEnabled, !Condition IsSlurm2511OrLater]
+  # GPU health-check prolog (cluster-wide Prolog custom setting). PCS supports Prolog only
+  # at the cluster level (not per CNG), so we scope it to GPU nodes via a GPU-aware prolog
+  # script that no-ops on CPU/login nodes.
+  IncludeGpuHealthCheck: !Equals [!Ref GpuHealthCheck, 'prolog']
   # Emit SlurmConfiguration only when at least one custom setting / accounting block
   # actually applies. Monitoring alone on Slurm < 25.11 contributes nothing (its
   # metrics settings are gated by IncludeMetricsConfig), so it must NOT force an
@@ -98,6 +118,7 @@ Conditions:
     - !Condition IncludeAccountingConfig
     - !Condition SetAccountingPolicy
     - !Condition IncludeMetricsConfig
+    - !Condition IncludeGpuHealthCheck
 
 
 Resources:
@@ -138,6 +159,20 @@ Resources:
               - IncludeMetricsConfig
               - ParameterName: CommunicationParameters
                 ParameterValue: enable_http
+              - !Ref AWS::NoValue
+            # GPU health-check prolog: runs fast GPU/EFA checks before each job and
+            # drains+requeues on failure. Path is where add-cng*'s UserData installs the
+            # health-check suite on GPU compute nodes. PrologFlags=Alloc runs it once per
+            # job allocation (not per task step).
+            - !If
+              - IncludeGpuHealthCheck
+              - ParameterName: Prolog
+                ParameterValue: /opt/aws/pcs/gpu-healthcheck/slurm/prolog-gpu-healthcheck.sh
+              - !Ref AWS::NoValue
+            - !If
+              - IncludeGpuHealthCheck
+              - ParameterName: PrologFlags
+                ParameterValue: Alloc
               - !Ref AWS::NoValue
         - !Ref AWS::NoValue
 

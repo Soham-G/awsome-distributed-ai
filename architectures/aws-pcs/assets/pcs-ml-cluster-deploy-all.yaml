@@ -29,6 +29,7 @@ Metadata:
           - SSHAccessCidr
           - ManagedAccounting
           - AccountingPolicyEnforcement
+          - GpuHealthCheck
       - Label:
           default: "3. On-Demand Compute Node Group"
         Parameters:
@@ -445,6 +446,19 @@ Parameters:
     AllowedValues:
       - none
       - 'associations,limits,safe'
+
+  GpuHealthCheck:
+    Type: String
+    Description: >-
+      Enable the GPU health-check Slurm prolog. 'prolog' sets a cluster-wide Slurm
+      Prolog that runs fast GPU/EFA checks (nvidia-smi + EFA enumeration, ~8s) before
+      each job and drains the node + requeues the job on failure. The prolog is
+      GPU-aware (no-ops on CPU/login nodes), and the health-check suite is installed on
+      the GPU compute node group at first boot. 'none' (default) disables it.
+    Default: 'none'
+    AllowedValues:
+      - 'none'
+      - 'prolog'
 
   LoginNodeInstanceType:
     Type: String
@@ -893,6 +907,7 @@ Resources:
         ManagedAccounting: !Ref ManagedAccounting
         AccountingPolicyEnforcement: !Ref AccountingPolicyEnforcement
         DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-Cluster'
@@ -1077,6 +1092,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
@@ -1125,6 +1141,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
@@ -1173,6 +1190,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
@@ -1222,6 +1240,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eFull'
@@ -1271,6 +1290,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eFullSpot'
@@ -1320,6 +1340,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eHalf'
@@ -1369,6 +1390,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eHalfSpot'
