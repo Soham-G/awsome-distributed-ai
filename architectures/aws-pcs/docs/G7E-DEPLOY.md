@@ -1,14 +1,55 @@
-# Deploying a g7e GPU cluster
+# Deploying a g7 / g7e / g6e GPU cluster
 
-Quick guide for standing up an AWS PCS cluster with **g7e** GPU nodes. Two sizes are
-available as separate queues, each in On-Demand and Spot flavors:
-- **full** = `g7e.48xlarge` (8× NVIDIA RTX PRO 6000, 4 EFA NICs) via
-  [`assets/add-cng-g7e.yaml`](../assets/add-cng-g7e.yaml)
-- **half** = `g7e.24xlarge` (4 GPUs, 2 EFA NICs) via
-  [`assets/add-cng-g7e-24xl.yaml`](../assets/add-cng-g7e-24xl.yaml)
+Quick guide for standing up an AWS PCS cluster with **g7**, **g7e**, and **g6e** GPU
+nodes. Each family comes in two sizes, and each (family, size, AZ) combination is its own
+independent On-Demand queue:
 
-Each queue is an independent toggle (`DeployG7eFull` / `DeployG7eFullSpot` /
-`DeployG7eHalf` / `DeployG7eHalfSpot`) — deploy any combination.
+- **g7** — `g7.48xlarge` (8× NVIDIA RTX PRO 4500, 2 EFA NICs) via
+  [`assets/add-cng-g7.yaml`](../assets/add-cng-g7.yaml) and `g7.24xlarge` (4 GPUs, 1 EFA NIC)
+  via [`assets/add-cng-g7-24xl.yaml`](../assets/add-cng-g7-24xl.yaml)
+- **g7e** — `g7e.48xlarge` (8× NVIDIA RTX PRO 6000, 4 EFA NICs) via
+  [`assets/add-cng-g7e.yaml`](../assets/add-cng-g7e.yaml) and `g7e.24xlarge` (4 GPUs, 2 EFA NICs)
+  via [`assets/add-cng-g7e-24xl.yaml`](../assets/add-cng-g7e-24xl.yaml)
+- **g6e** — `g6e.48xlarge` (8× NVIDIA L40S, 4 EFA NICs) via
+  [`assets/add-cng-g6e.yaml`](../assets/add-cng-g6e.yaml) and `g6e.24xlarge` (4 GPUs, 2 EFA NICs)
+  via [`assets/add-cng-g6e-24xl.yaml`](../assets/add-cng-g6e-24xl.yaml)
+
+## Per-AZ queues (why there are ten)
+
+GPU capacity for these families is **AZ-specific**, and a multi-NIC EFA node group is
+**single-AZ by construction**: the launch template pins the subnet inside each EFA network
+interface, and AWS PCS requires the node group's subnet to match — so a single queue
+cannot span AZs while keeping EFA. To run a family in more than one AZ, deploy a separate
+queue per AZ. The template ships ten independent On-Demand queues:
+
+| Queue (Slurm partition) | Instance | AZ slot | Default |
+|---|---|---|---|
+| `gpu-g7-full`      | g7.48xlarge  | primary (`PrimarySubnetAZ`) | on |
+| `gpu-g7-half`      | g7.24xlarge  | primary | **off** |
+| `gpu-g7e-full`     | g7e.48xlarge | primary | on |
+| `gpu-g7e-half`     | g7e.24xlarge | primary | on |
+| `gpu-g7e-full-az2` | g7e.48xlarge | AZ2 (`AdditionalSubnetAZ2`) | on |
+| `gpu-g7e-half-az2` | g7e.24xlarge | AZ2 | on |
+| `gpu-g6e-full-az2` | g6e.48xlarge | AZ2 | on |
+| `gpu-g6e-half-az2` | g6e.24xlarge | AZ2 | on |
+| `gpu-g6e-full-az3` | g6e.48xlarge | AZ3 (`AdditionalSubnetAZ3`) | on |
+| `gpu-g6e-half-az3` | g6e.24xlarge | AZ3 | on |
+
+> **PCS caps a cluster at 10 compute node groups and 10 queues (both non-adjustable).**
+> The login node group always consumes one node-group slot, so all ten GPU queues can't
+> coexist with it. **Nine** GPU queues default on and **`gpu-g7-half` defaults off**
+> (g7-full still covers the g7 family in the primary AZ) — giving login + 9 GPU = exactly
+> 10 node groups. The **CPU queue** (`DeployOnDemandCNG`) is also **off by default** for the
+> same reason. To turn on `gpu-g7-half` or the CPU queue, **disable another GPU queue first**
+> to stay ≤ 10 node groups; a template `Rule` fails the stack fast (with a clear message,
+> not the opaque `ComputeNodeGroup` quota rollback) if the full default GPU set is combined
+> with either.
+
+Every queue is an independent toggle (`DeployG7Full`, `DeployG7eFullAz2`,
+`DeployG6eHalfAz3`, …). `MinCount` stays `0`, so a queue costs nothing until a job is
+submitted to its partition. The `-az2` / `-az3` queues additionally require their
+`AdditionalSubnetAZ2` / `AdditionalSubnetAZ3` to be set — if the AZ isn't provided, that
+queue **self-skips** instead of failing the stack.
 
 It reuses the standard cluster: VPC + networking, FSx for Lustre (`/fsx` scratch),
 FSx for OpenZFS (`/home`), and the Slurm scheduler. Enroot/Pyxis is installed at
@@ -18,38 +59,38 @@ first boot so containerized jobs work out of the box.
 
 - AWS CLI configured (`aws sts get-caller-identity`) with permissions to create
   CloudFormation, PCS, EC2, FSx, and IAM resources.
-- **g7e.48xlarge must actually launch in your AZ.** Two independent gates have to
-  clear, and both surface the same misleading Slurm symptom — `Node failure ... nodes
-  are still not ready / Something is wrong with the boot of the nodes` — even though
+- **The instance types must actually launch in the AZs you pick.** Two independent gates
+  have to clear, and both surface the same misleading Slurm symptom — `Node failure ...
+  nodes are still not ready / Something is wrong with the boot of the nodes` — even though
   **no instance ever launched** (the EC2 request is rejected before boot):
 
-  1. **Capacity (ICE).** EC2 must have spare g7e capacity in your AZ at scale-up time.
-     A new/scarce GPU family often returns an *Insufficient Capacity Error* on
-     On-Demand. First confirm the type is even offered in your AZ:
+  1. **Capacity (ICE).** EC2 must have spare capacity for that type in that AZ at scale-up
+     time. A new/scarce GPU family often returns an *Insufficient Capacity Error* on
+     On-Demand. First confirm the type is even offered per AZ:
      ```bash
-     aws ec2 describe-instance-type-offerings --location-type availability-zone \
+     aws ec2 describe-instance-type-offerings --location-type availability-zone-id \
        --filters Name=instance-type,Values=g7e.48xlarge \
        --query 'InstanceTypeOfferings[].Location' --region <region> --output text
      ```
      Being offered ≠ available right now. If scale-up fails with no instance created:
-     **set `G7eUsePlacementGroup=false`** (a cluster placement group concentrates all
-     nodes in one tight physical group and is a common ICE trigger — relaxing it lets
-     EC2 place nodes wherever there's capacity), try the other AZ (`PrimarySubnetAZ`),
-     or retry later. **Capacity Blocks for ML do NOT apply to g7e** — Capacity Blocks
-     cover the P/Trn training families only (verified: `describe-capacity-block-offerings`
-     rejects `g7e.48xlarge` with "not supported for Capacity Blocks"), so that is not a
-     fallback for this instance type.
-  2. **Quota.** g7e.48xlarge is **192 vCPUs**, g7e.24xlarge is **96 vCPUs**, and
-     On-Demand vs Spot use *separate* quotas — raise whichever purchasing mode you're
-     using to `>= sum of (vCPUs × max nodes)` across the queues of that mode:
+     **set `GpuUsePlacementGroup=false`** (a cluster placement group concentrates all nodes
+     in one tight physical group and is a common ICE trigger — relaxing it lets EC2 place
+     nodes wherever there's capacity), move the family to a different AZ (its `-az2`/`-az3`
+     queue), or retry later. **Capacity Blocks for ML do NOT apply to g7/g7e/g6e** — they
+     cover the P/Trn training families only — so that is not a fallback for these types.
+  2. **Quota.** g7/g7e/g6e are all **G/VT On-Demand** instances (48xlarge = 192 vCPUs,
+     24xlarge = 96 vCPUs). Raise the On-Demand G/VT quota to `>= sum of (vCPUs × max nodes)`
+     across all g7/g7e/g6e queues you enable:
      ```bash
-     # On-Demand G/VT  (DeployG7eFull + DeployG7eHalf nodes)
+     # On-Demand Running G/VT instances
      aws service-quotas get-service-quota --service-code ec2 \
        --quota-code L-DB2E81BA --region <region> --query 'Quota.Value' --output text
-     # Spot G/VT  (DeployG7eFullSpot + DeployG7eHalfSpot nodes) — Client.MaxSpotInstanceCountExceeded if too low
-     aws service-quotas get-service-quota --service-code ec2 \
-       --quota-code L-3819A6DF --region <region> --query 'Quota.Value' --output text
      ```
+- **AZ capacity guidance (us-east-2 example).** Pick the AZ for each family where it has
+  capacity. As observed in `us-east-2`: **g7** has capacity in most AZs; **g7e** in `az1`
+  and `az2`; **g6e** in `az2` and `az3`. That maps cleanly onto the queue layout: g7 + g7e
+  in the primary AZ (use `az1` or `az2`), g7e also in AZ2, and g6e in AZ2 + AZ3. Confirm
+  live before deploying with `describe-instance-type-offerings` (above).
 - An S3 bucket you own. Nested stacks are fetched by URL, so the templates must be
   staged in S3 (you can't deploy the parent with a local `--template-body` and have
   it find the child templates). The bucket can be private.
@@ -57,7 +98,7 @@ first boot so containerized jobs work out of the box.
 ## 2. Stage the templates
 
 Run from the repo's `architectures/aws-pcs` directory so `assets/` is the source.
-This uploads every template (including `add-cng-g7e.yaml`) and the boot scripts:
+This uploads every template (including the g7/g7e/g6e CNG templates) and the boot scripts:
 
 ```bash
 cd architectures/aws-pcs
@@ -74,27 +115,41 @@ aws s3 sync assets/ "s3://${BUCKET}/${PREFIX}" \
 
 ## 3. Deploy
 
+Set the three AZs to where each family has capacity. The primary AZ carries the g7 and g7e
+queues; AZ2 carries the g7e-az2 + g6e-az2 queues; AZ3 carries the g6e-az3 queues. The nine
+default-on GPU queues (all except `gpu-g7-half`; see the node-group-cap note above) come up
+from just the three AZ parameters.
+
+> **Pick AZs by ID, not by name.** Availability Zone **names** (`us-east-2a`) are shuffled
+> per account — `us-east-2a` in one account can be a different physical AZ than in another —
+> so a hardcoded name won't reproduce the same capacity elsewhere. Availability Zone **IDs**
+> (`use2-az1`) are stable across all accounts, and the capacity guidance above is stated in
+> IDs. The template parameters need the *name* (they're typed
+> `AWS::EC2::AvailabilityZone::Name`), so resolve ID → name at deploy time:
+>
+> ```bash
+> az_name() { aws ec2 describe-availability-zones --region "$REGION" \
+>   --filters "Name=zone-id,Values=$1" --query 'AvailabilityZones[0].ZoneName' --output text; }
+> ```
+
 ```bash
 REGION=us-east-2
-AZ=us-east-2a
-SSH_CIDR=85.8.167.188/32          # <-- your IP/CIDR for SSH to the login node
+# Target physical AZs by stable ID (portable across accounts):
+AZ=$(az_name use2-az1)            # primary — g7 + g7e capacity
+AZ2=$(az_name use2-az2)           # g7e + g6e capacity
+AZ3=$(az_name use2-az3)           # g6e capacity
+SSH_CIDR=203.0.113.4/32           # <-- your IP/CIDR for SSH to the login node
 
 aws cloudformation create-stack \
-  --stack-name pcs-g7e \
+  --stack-name pcs-gpu \
   --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ml-cluster-deploy-all.yaml" \
   --parameters \
     ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ} \
+    ParameterKey=AdditionalSubnetAZ2,ParameterValue=${AZ2} \
+    ParameterKey=AdditionalSubnetAZ3,ParameterValue=${AZ3} \
     ParameterKey=S3BucketName,ParameterValue=${BUCKET} \
     ParameterKey=S3KeyPrefix,ParameterValue=${PREFIX} \
-    ParameterKey=DeployG7eFull,ParameterValue=true \
-    ParameterKey=G7eFullMaxCount,ParameterValue=2 \
-    ParameterKey=DeployG7eFullSpot,ParameterValue=true \
-    ParameterKey=G7eFullSpotMaxCount,ParameterValue=2 \
-    ParameterKey=DeployG7eHalf,ParameterValue=true \
-    ParameterKey=G7eHalfMaxCount,ParameterValue=2 \
-    ParameterKey=DeployG7eHalfSpot,ParameterValue=true \
-    ParameterKey=G7eHalfSpotMaxCount,ParameterValue=2 \
-    ParameterKey=G7eUsePlacementGroup,ParameterValue=false \
+    ParameterKey=GpuUsePlacementGroup,ParameterValue=false \
     ParameterKey=LoginNodeInstanceType,ParameterValue=c7i.xlarge \
     ParameterKey=OnDemandInstanceType,ParameterValue=c7i.4xlarge \
     ParameterKey=SSHAccessCidr,ParameterValue=${SSH_CIDR} \
@@ -106,21 +161,27 @@ aws cloudformation create-stack \
   --region ${REGION}
 ```
 
-This brings up four g7e Slurm partitions: `gpu-g7e-full` (48xlarge On-Demand),
-`gpu-g7e-full-spot` (48xlarge Spot), `gpu-g7e-half` (24xlarge On-Demand), and
-`gpu-g7e-half-spot` (24xlarge Spot). Each is an **independent toggle** — drop any
-`DeployG7e*` line you don't want (e.g. keep only `DeployG7eHalf=true` for a single
-24xlarge On-Demand queue).
+This brings up the nine default-on GPU Slurm partitions (all listed above except
+`gpu-g7-half`, which defaults off to respect the 10-node-group cap — see the note above).
+Each is an **independent toggle** — set any `DeployG7*` / `DeployG7e*` / `DeployG6e*` to
+`false` to drop queues you don't want (e.g. keep only `DeployG6eFullAz3=true` for a single
+g6e 48xlarge queue in AZ3). To enable `gpu-g7-half` or the CPU queue, disable another GPU
+queue in the same command so the total stays ≤ 10 node groups (login + 9). If you omit
+`AdditionalSubnetAZ2` / `AdditionalSubnetAZ3`, every queue pinned to that AZ self-skips and
+you get a single-AZ cluster with just the g7 + g7e primary queues.
 
 Useful parameter notes:
 
 | Parameter | Value here | Notes |
 |---|---|---|
-| `DeployG7eFull` / `…FullSpot` | `true` | g7e.48xlarge (8 GPUs, 4-NIC EFA) On-Demand / Spot queues. Template `add-cng-g7e.yaml` |
-| `DeployG7eHalf` / `…HalfSpot` | `true` | g7e.24xlarge (4 GPUs, 2-NIC EFA) On-Demand / Spot queues. Template `add-cng-g7e-24xl.yaml` |
-| `G7e*MaxCount` | `2` | Per-queue max nodes; matching `…MinCount` defaults to 0 (scales from zero) |
-| `G7eUsePlacementGroup` | `true` (default) | Applies to **both On-Demand** g7e queues. Set `false` to drop the cluster placement group — a cluster PG forces all nodes into one tight physical group and can cause `InsufficientInstanceCapacity` for scarce types like g7e; relaxing it improves launch success (best for single-node jobs; multi-node loses some latency locality). No effect on the Spot queues |
-| `G7eSpotAllocationStrategy` | *(default `price-capacity-optimized`)* | Applies to **both Spot** g7e queues. `price-capacity-optimized` (recommended) / `capacity-optimized` / `lowest-price` |
+| `AdditionalSubnetAZ2` / `AdditionalSubnetAZ3` | AZ names | Create the extra private subnets the `-az2` / `-az3` queues launch into. **Required** for those queues (they self-skip if empty) |
+| `DeployG7Full` / `DeployG7Half` | `true` (default) | g7.48xlarge (2-NIC EFA) / g7.24xlarge (1-NIC EFA), primary AZ. Templates `add-cng-g7.yaml` / `add-cng-g7-24xl.yaml` |
+| `DeployG7eFull` / `DeployG7eHalf` | `true` (default) | g7e.48xlarge (4-NIC EFA) / g7e.24xlarge (2-NIC EFA), primary AZ. Templates `add-cng-g7e.yaml` / `add-cng-g7e-24xl.yaml` |
+| `DeployG7eFullAz2` / `DeployG7eHalfAz2` | `true` (default) | Same g7e templates, pinned to AZ2 |
+| `DeployG6eFullAz2` / `DeployG6eHalfAz2` | `true` (default) | g6e.48xlarge (4-NIC EFA) / g6e.24xlarge (2-NIC EFA), AZ2. Templates `add-cng-g6e.yaml` / `add-cng-g6e-24xl.yaml` |
+| `DeployG6eFullAz3` / `DeployG6eHalfAz3` | `true` (default) | Same g6e templates, pinned to AZ3 |
+| `G7*/G7e*/G6e*MaxCount` | `2` | Per-queue max nodes; matching `…MinCount` defaults to 0 (scales from zero) |
+| `GpuUsePlacementGroup` | `true` (default) | Applies to **all** g7/g7e/g6e queues. Set `false` to drop the cluster placement group — a cluster PG forces all nodes into one tight physical group and can cause `InsufficientInstanceCapacity` for scarce types; relaxing it improves launch success (best for single-node jobs; multi-node loses some latency locality) |
 | `LoginNodeInstanceType` | `c7i.xlarge` | Login node size (default `m6i.4xlarge`) |
 | `OnDemandInstanceType` | `c7i.4xlarge` | CPU queue node size (default `c6i.4xlarge`) |
 | `SSHAccessCidr` | `203.0.113.4/32` | Opens SSH/22 on the login node to this CIDR. **Replace with your own IP/CIDR.** Empty (default) = SSM only |
@@ -139,34 +200,27 @@ Useful parameter notes:
 > failure if the login node is down. Add users with the helper on the login node — see
 > [USER-MANAGEMENT.md](./USER-MANAGEMENT.md).
 
-> **Spot nodes can be reclaimed at any time** (EC2 gives a 2-minute warning). For the
-> `*-spot` queues, checkpoint long jobs and submit with `--requeue` so Slurm requeues
-> an interrupted job instead of failing it. Spot draws on a separate capacity pool from
-> On-Demand (so it sidesteps the On-Demand G/VT quota — but Spot has its **own** G/VT
-> quota), and g7e Spot capacity can also be scarce; if a pool is empty that queue simply
-> won't scale (no node launches).
-
-> **Note — g7e and Capacity Blocks.** g7e is **not** eligible for Capacity Blocks for ML
-> (those cover the P/Trn training families only), so there is no Capacity-Block option
-> for these queues — On-Demand and Spot are the only purchasing modes.
+> **Note — g7/g7e/g6e and Capacity Blocks.** None of these families are eligible for
+> Capacity Blocks for ML (those cover the P/Trn training families only), so the queues are
+> On-Demand only — there is no Capacity-Block or Spot purchasing option for them here.
 
 #### Changing queues on an already-deployed stack
 
-You do **not** need to delete and recreate — `update-stack` adds or removes g7e queues
+You do **not** need to delete and recreate — `update-stack` adds or removes GPU queues
 in place (each queue is its own nested stack; toggling one doesn't disturb the others or
 the login/CPU nodes). First re-sync `assets/` to your bucket (step 2) so the updated
-templates are published, then pass the `DeployG7e*` values you want and keep everything
+templates are published, then pass the `Deploy*` values you want and keep everything
 else with `UsePreviousValue=true`:
 
 ```bash
-aws cloudformation update-stack --stack-name pcs-g7e --region ${REGION} \
+aws cloudformation update-stack --stack-name pcs-gpu --region ${REGION} \
   --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ml-cluster-deploy-all.yaml" \
   --parameters \
-    ParameterKey=DeployG7eHalf,ParameterValue=true \
-    ParameterKey=G7eHalfMaxCount,ParameterValue=2 \
-    $(aws cloudformation describe-stacks --stack-name pcs-g7e --region ${REGION} \
+    ParameterKey=DeployG6eHalfAz3,ParameterValue=true \
+    ParameterKey=G6eHalfAz3MaxCount,ParameterValue=2 \
+    $(aws cloudformation describe-stacks --stack-name pcs-gpu --region ${REGION} \
         --query "Stacks[0].Parameters[].ParameterKey" --output text \
-      | tr '\t' '\n' | grep -vx -e DeployG7eHalf -e G7eHalfMaxCount \
+      | tr '\t' '\n' | grep -vx -e DeployG6eHalfAz3 -e G6eHalfAz3MaxCount \
       | sed 's/.*/ParameterKey=&,UsePreviousValue=true/') \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
 ```
@@ -177,19 +231,19 @@ spell out the ones you're changing. (Match `--stack-name` to your deployed stack
 ## 4. Monitor progress
 
 ```bash
-aws cloudformation describe-stacks --stack-name pcs-g7e --region ${REGION} \
+aws cloudformation describe-stacks --stack-name pcs-gpu --region ${REGION} \
   --query 'Stacks[0].StackStatus' --output text
 ```
 
-Typical create time is ~25–30 min (mostly VPC + FSx). When complete, the nested
-`G7eCNGStack` is present (the P5/P6 stacks are not).
+Typical create time is ~25–30 min (mostly VPC + FSx). When complete, the enabled GPU CNG
+nested stacks are present (the P5/P6 stacks are not, unless you also enabled them).
 
 ## 5. Connect and run a job
 
 Connect to the login node over SSM (no SSH key needed):
 
 ```bash
-CLUSTER_ID=$(aws cloudformation describe-stacks --stack-name pcs-g7e --region ${REGION} \
+CLUSTER_ID=$(aws cloudformation describe-stacks --stack-name pcs-gpu --region ${REGION} \
   --query 'Stacks[0].Outputs[?OutputKey==`ClusterId`].OutputValue' --output text)
 # The login node carries Name=PCS-login (PCS does NOT add a compute-node-group-name
 # tag — it tags instances with aws:pcs:compute-node-group-id, an opaque pcs_xxxx ID).
@@ -208,17 +262,18 @@ disabled the Enroot/Pyxis install via `PostInstallScriptUrl=" "`, so the
 the PCS-Ready DLAMI, which already has the NVIDIA driver, CUDA, and EFA stack.)
 
 ```bash
-sinfo   # lists the g7e partitions you deployed: gpu-g7e-full / -full-spot / -half / -half-spot
+sinfo   # lists the nine default GPU partitions you deployed (gpu-g7-full, gpu-g7e-full-az2, gpu-g6e-half-az3, ...; gpu-g7-half only if you enabled it)
 
 # Full (48xlarge): confirm all 8 GPUs are visible (scales a node up from 0; first launch ~3-5 min)
 srun --partition=gpu-g7e-full --gpus-per-node=8 nvidia-smi -L
 
-# Full has 4 EFA cards; half (24xlarge) has 2. Confirm the fabric enumerates:
+# Confirm the EFA fabric enumerates per family/size (full=4 for g7e/g6e, 2 for g7; half=2 for g7e/g6e, 1 for g7):
 srun --partition=gpu-g7e-full fi_info -p efa | grep -c "provider: efa"   # expect 4
-srun --partition=gpu-g7e-half fi_info -p efa | grep -c "provider: efa"   # expect 2
+srun --partition=gpu-g7-full  fi_info -p efa | grep -c "provider: efa"   # expect 2
+srun --partition=gpu-g7-half  fi_info -p efa | grep -c "provider: efa"   # expect 1
 
-# A Spot node, same idea (may not scale if the g7e Spot pool is empty):
-srun --partition=gpu-g7e-full-spot --gpus-per-node=8 nvidia-smi -L
+# A g6e node in AZ3, same idea (scales in the AZ3 subnet):
+srun --partition=gpu-g6e-full-az3 --gpus-per-node=8 nvidia-smi -L
 ```
 
 ### Adding users
@@ -248,17 +303,17 @@ sbatch --partition=gpu-g7e-full nccl-tests-container.sbatch
 ```
 
 In the output, EFA is active when you see
-`NET/OFI Selected provider is efa ... (found 4 nics)`, and a healthy run ends with
-`# Out of bounds values : 0 OK`.
+`NET/OFI Selected provider is efa ... (found 4 nics)` (or the matching NIC count for the
+partition), and a healthy run ends with `# Out of bounds values : 0 OK`.
 
 > A stack update only re-runs first-boot scripts on **newly launched** nodes, so
-> let the GPU queue scale a fresh node (or terminate existing ones) after
+> let a GPU queue scale a fresh node (or terminate existing ones) after
 > re-enabling the install.
 
 ## 6. Clean up
 
 ```bash
-aws cloudformation delete-stack --stack-name pcs-g7e --region ${REGION}
+aws cloudformation delete-stack --stack-name pcs-gpu --region ${REGION}
 ```
 
 Nested stacks and the FSx filesystems are deleted automatically — **back up any

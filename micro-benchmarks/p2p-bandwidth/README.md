@@ -116,7 +116,7 @@ GPU_PAIRS="0:1 0:2 0:7 3:4" sbatch -p gpu-p5en-spot osu-p2p-mpi.sbatch
 ```
 
 The GPU architecture is **auto-detected** (`nvidia-smi --query-gpu=compute_cap`), so both
-scripts also work unchanged on the `gpu-g7e-*` and P6/B200 queues.
+scripts also work unchanged on the `gpu-g7-*`, `gpu-g7e-*`, `gpu-g6e-*`, and P6/B200 queues.
 
 ## Reading the results
 

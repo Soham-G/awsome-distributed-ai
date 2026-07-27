@@ -58,7 +58,7 @@ MonitoringStack=Prometheus-LoginNode
 | **Slurm job as LDAP user** | `srun` as `testuser1` runs with `uid=10001` on the compute node | ✅ |
 | **Multi-node UID consistency** | two different compute nodes both resolve `testuser1`→`uid=10001` | ✅ |
 | **User delete propagation** | `ldapdelete` + `sss_cache -E` removes the user from `getent` immediately (sssd-tools now installed) | ✅ |
-| **Template lint** | `validate-template` passes on all 8 edited `assets/*.yaml` (incl. 3 GPU templates + 2 IAM stacks) | ✅ |
+| **Template lint** | `validate-template` passes on the edited `assets/*.yaml`, including the 9 GPU CNG templates (`add-cng-p5`, `add-cng-p6-b200`, `add-cng-p6-b300`, `add-cng-g7`, `add-cng-g7-24xl`, `add-cng-g7e`, `add-cng-g7e-24xl`, `add-cng-g6e`, `add-cng-g6e-24xl`) + 2 IAM stacks. The parent `pcs-ml-cluster-deploy-all.yaml` exceeds the 51,200-byte inline `--template-body` limit — validate it via `--template-url` (S3) instead | ✅ |
 | **`OnDemandEfaInterfaceCount` (0/1/2 collapse)** | `=1` → hpc6a launch template has 1 EFA NIC; `=2` → hpc8a has 2 EFA NICs (`DeviceIndex 0/1`, `InterfaceType: efa`). Real EFA traffic on hpc8a (2 nodes, `FI_PROVIDER=efa`): `osu_bw` peak **26.3 GB/s** (~210 Gbps, 1 pair); `osu_mbw_mr` peak **42.9 GB/s** (~343 Gbps, 16 pairs/node multi-rail) | ✅ |
 | **Slurm managed accounting + multi-user (Test 12)** | on a `ManagedAccounting=enabled` cluster: LDAP users alice/bob registered in `sacctmgr` (account=ml-team) as root admin; jobs submitted as each LDAP user complete and `sacct -a` records them under the correct `User`+`Account` (`scontrol show job`: `UserId=alice(10001) Account=ml-team`) | ✅ |
 
