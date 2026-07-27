@@ -52,13 +52,19 @@ Deploy a complete cluster with one nested CloudFormation stack:
 equivalent (set your AZ in the first line):
 
 ```bash
-AZ_ID=us-east-1a   # <-- the one required choice: your target Availability Zone
+REGION=us-east-1
+# Pick your target AZ by its stable ID (use1-az1 etc.) — AZ *names* (us-east-1a) are
+# shuffled per account, so an ID reproduces the same physical AZ in any account. The
+# template parameter needs the name, so resolve ID -> name:
+AZ=$(aws ec2 describe-availability-zones --region ${REGION} \
+  --filters Name=zone-id,Values=use1-az1 \
+  --query 'AvailabilityZones[0].ZoneName' --output text)
 
 aws cloudformation create-stack \
   --stack-name pcs-ml-cluster \
   --template-url https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml \
-  --parameters ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ_ID} \
-  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
+  --parameters ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ} \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
 ```
 
 This brings up (≈25–30 min, mostly VPC/FSx): 1 login node (m6i.4xlarge) with monitoring,
@@ -178,8 +184,12 @@ automatically.
 | `p5en.48xlarge` | 8× H200 | 16 | `add-cng-p5.yaml` |
 | `p6-b200.48xlarge` | 8× B200 | 8 | `add-cng-p6-b200.yaml` |
 | `p6-b300.48xlarge` | 8× B300 | 16 (of 17 interfaces; the primary is ENA-only) | `add-cng-p6-b300.yaml` |
+| `g7.48xlarge` | 8× RTX PRO 4500 | 2 | `add-cng-g7.yaml` |
+| `g7.24xlarge` | 4× RTX PRO 4500 | 1 | `add-cng-g7-24xl.yaml` |
 | `g7e.48xlarge` | 8× RTX PRO 6000 | 4 | `add-cng-g7e.yaml` |
 | `g7e.24xlarge` | 4× RTX PRO 6000 | 2 | `add-cng-g7e-24xl.yaml` |
+| `g6e.48xlarge` | 8× L40S | 4 | `add-cng-g6e.yaml` |
+| `g6e.24xlarge` | 4× L40S | 2 | `add-cng-g6e-24xl.yaml` |
 
 **Capacity options:**
 - **On-Demand**: leave `CapacityReservationId` empty.
@@ -207,19 +217,22 @@ types, throughput, and capacity are covered in [§8.1 Storage](#81-storage-fsx-d
 ## 5. Usage Examples
 
 The default cluster (1 login + `cpu1` queue) is covered in [§3 Quick Start](#3-quick-start);
-the examples below show the more common customizations. Each one starts by setting
-`AZ_ID` — the one required choice.
+the examples below show the more common customizations. Each one starts by setting `AZ` —
+the one required choice. Pick your AZ by its **stable ID** and resolve it to a name (AZ
+names are shuffled per account; see the [Quick Start](#3-quick-start) for why and the
+`describe-availability-zones` one-liner). For brevity the examples below show a name
+literal — substitute the resolved value.
 
 ### Example 1: Single-NIC GPU queue (G6)
 
 ```bash
-AZ_ID=us-east-1a   # your target Availability Zone
+AZ=us-east-1a   # your target Availability Zone
 
 aws cloudformation create-stack \
   --stack-name gpu-cluster \
   --template-url https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml \
   --parameters \
-    ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ_ID} \
+    ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ} \
     ParameterKey=OnDemandCngName,ParameterValue=gpu-g6 \
     ParameterKey=OnDemandQueueName,ParameterValue=gpu-g6 \
     ParameterKey=OnDemandInstanceType,ParameterValue=g6.12xlarge \
@@ -231,14 +244,14 @@ Replaces the default `cpu1` queue with a `gpu-g6` queue of g6.12xlarge instances
 ### Example 2: Multi-NIC GPU with a Capacity Block (P6-B300)
 
 ```bash
-AZ_ID=us-west-2b
+AZ=us-west-2b
 CAPACITY_RESERVATION_ID="cr-0a1b2c3d4e5f67890"
 
 aws cloudformation create-stack \
   --stack-name p6-b300-cb-cluster \
   --template-url https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml \
   --parameters \
-    ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ_ID} \
+    ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ} \
     ParameterKey=DeployPseriesCNG,ParameterValue=true \
     ParameterKey=PseriesCngName,ParameterValue=gpu-p6b300 \
     ParameterKey=PseriesQueueName,ParameterValue=gpu-p6b300 \
@@ -257,13 +270,13 @@ On-Demand or an "open" ODCR, leave it empty (see [GPU compute](#gpu-compute-p5p6
 ### Example 3: HPC EFA on the CPU queue (hpc7a)
 
 ```bash
-AZ_ID=us-east-2b   # check your target type's AZ availability first
+AZ=us-east-2b   # check your target type's AZ availability first
 
 aws cloudformation create-stack \
   --stack-name hpc7a-cluster \
   --template-url https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml \
   --parameters \
-    ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ_ID} \
+    ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ} \
     ParameterKey=OnDemandCngName,ParameterValue=hpc7a \
     ParameterKey=OnDemandQueueName,ParameterValue=hpc \
     ParameterKey=OnDemandInstanceType,ParameterValue=hpc7a.96xlarge \
@@ -702,8 +715,12 @@ parameter and default, see [PARAMETERS.md](./docs/PARAMETERS.md).
 | [`add-cng-p5.yaml`](./assets/add-cng-p5.yaml) | P5/P5e/P5en nodes (16/32 EFA interfaces, by type); On-Demand, Spot, or Capacity Block via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p5.yaml&stackName=pcs-add-cng-p5) |
 | [`add-cng-p6-b200.yaml`](./assets/add-cng-p6-b200.yaml) | P6-B200 nodes (8 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p6-b200.yaml&stackName=pcs-add-cng-p6-b200) |
 | [`add-cng-p6-b300.yaml`](./assets/add-cng-p6-b300.yaml) | P6-B300 nodes (17 interfaces: 16 EFA + 1 ENA) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-p6-b300.yaml&stackName=pcs-add-cng-p6-b300) |
-| [`add-cng-g7e.yaml`](./assets/add-cng-g7e.yaml) | g7e.48xlarge nodes (4 EFA interfaces); On-Demand or Spot via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e.yaml&stackName=pcs-add-cng-g7e) |
-| [`add-cng-g7e-24xl.yaml`](./assets/add-cng-g7e-24xl.yaml) | g7e.24xlarge nodes (2 EFA interfaces); On-Demand or Spot via `PurchaseOption` | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e-24xl.yaml&stackName=pcs-add-cng-g7e-24xl) |
+| [`add-cng-g7.yaml`](./assets/add-cng-g7.yaml) | g7.48xlarge nodes (2 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7.yaml&stackName=pcs-add-cng-g7) |
+| [`add-cng-g7-24xl.yaml`](./assets/add-cng-g7-24xl.yaml) | g7.24xlarge nodes (1 EFA interface) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7-24xl.yaml&stackName=pcs-add-cng-g7-24xl) |
+| [`add-cng-g7e.yaml`](./assets/add-cng-g7e.yaml) | g7e.48xlarge nodes (4 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e.yaml&stackName=pcs-add-cng-g7e) |
+| [`add-cng-g7e-24xl.yaml`](./assets/add-cng-g7e-24xl.yaml) | g7e.24xlarge nodes (2 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g7e-24xl.yaml&stackName=pcs-add-cng-g7e-24xl) |
+| [`add-cng-g6e.yaml`](./assets/add-cng-g6e.yaml) | g6e.48xlarge nodes (4 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g6e.yaml&stackName=pcs-add-cng-g6e) |
+| [`add-cng-g6e-24xl.yaml`](./assets/add-cng-g6e-24xl.yaml) | g6e.24xlarge nodes (2 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g6e-24xl.yaml&stackName=pcs-add-cng-g6e-24xl) |
 | [`pcs-ready-dlami-with-enroot-pyxis.yaml`](./assets/pcs-ready-dlami-with-enroot-pyxis.yaml) | EC2 Image Builder: bake Enroot 3.5.0 + Pyxis 0.20.0 into the PCS-Ready DLAMI | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ready-dlami-with-enroot-pyxis.yaml&stackName=pcs-dlami) |
 
 `add-cng*` templates create a Slurm queue only when `QueueName` is set (leave it empty
@@ -739,9 +756,13 @@ pcs-ml-cluster-deploy-all.yaml                    ← user deploys this
 │          ├─ MonitoringRepo/MonitoringVersion → post-install.sh
 │          └─ setup-directory.sh client (when DirectoryRole=client)
 │
-└─► add-cng-p5.yaml / add-cng-p6-b200.yaml       ← GPU queue (optional)
-    / add-cng-p6-b300.yaml / add-cng-g7e.yaml / add-cng-g7e-24xl.yaml
-      • Multi-NIC EFA (4/8/16/32 cards, per-family)
+└─► add-cng-p5.yaml / add-cng-p6-b200.yaml       ← GPU queues (P/Trn optional;
+    / add-cng-p6-b300.yaml                             g7/g7e/g6e on by default)
+    / add-cng-g7.yaml / add-cng-g7-24xl.yaml
+    / add-cng-g7e.yaml / add-cng-g7e-24xl.yaml
+    / add-cng-g6e.yaml / add-cng-g6e-24xl.yaml
+      • Multi-NIC EFA (1/2/4/8/16/32 cards, per-family)
+      • g7/g7e/g6e: one queue per (family, AZ) with capacity (single-AZ each)
       • MonitoringRole=compute → DCGM Exporter
       • Same external script pattern as compute CNG
 

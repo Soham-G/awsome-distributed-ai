@@ -1,24 +1,33 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
+#
+# One add-cng template per GPU family/size by design: this file's NetworkInterfaces
+# block is hand-built for the g6e.24xlarge EFA layout (2 network cards, both EFA,
+# card 0 on DeviceIndex 0 and card 1 on DeviceIndex 1). g6e.24xlarge exposes 2 network
+# cards with MaximumEfaInterfaces=2 (4x NVIDIA L40S), so it needs a different
+# NIC topology than the 4-card g6e.48xlarge (add-cng-g6e.yaml). A variable-length NIC
+# list can't be a plain CFN parameter, so each size gets its own template (the same
+# rationale as the P5/P6 family templates). InstanceType is locked with AllowedValues
+# to match this block.
+#
+# Purchasing: this template serves On-Demand, Spot, and Capacity Block for ML,
+# selected by the PurchaseOption parameter (PCS sets the EC2 purchasing mode from
+# the AWS::PCS::ComputeNodeGroup PurchaseOption + SpotOptions; only Capacity Block
+# also needs the launch template's InstanceMarketOptions/CapacityReservationSpecification).
 
 AWSTemplateFormatVersion: '2010-09-09'
-Description: >
-  Add a Compute Node Group to a PCS cluster — login nodes, CPU queues, or single-NIC
-  GPU queues (e.g. C6i, G5, G6). Mounts the shared FSx filesystems, optionally
-  installs Enroot/Pyxis (PostInstallScriptUrl) and the monitoring exporters
-  (DeployMonitoring/MonitoringRole). A Slurm queue is created only when QueueName
-  is set (leave empty for login nodes).
-
-  EFA support (EfaInterfaceCount > 0) is available for CPU HPC instance types
-  (hpc8a/hpc7a/hpc6a etc., 1-2 EFA interfaces). When enabled the LaunchTemplate
-  switches to a NetworkInterfaces block with InterfaceType=efa, and a cluster
-  placement group is auto-created (override with PlacementGroupName to reuse an
-  existing one). For multi-NIC GPU instances (P5/P6 families) use the dedicated
-  add-cng-p5.yaml / add-cng-p6-b200.yaml / add-cng-p6-b300.yaml templates instead.
+Description: Adding Compute Node Group to PCS Cluster with multi-network interface (EFA) support for g6e.24xlarge (2 network cards; On-Demand, Spot, or Capacity Block)
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
+      - Label:
+          default: Capacity / purchasing options
+        Parameters:
+          - PurchaseOption
+          - SpotAllocationStrategy
+          - CapacityReservationId
+          - UsePlacementGroup
       - Label:
           default: Additional Compute Node Group Settings
         Parameters:
@@ -39,11 +48,6 @@ Metadata:
           - FSxLustreFilesystemMountName
           - FSxOpenZFSFilesystemId
       - Label:
-          default: EFA (CPU HPC instances)
-        Parameters:
-          - EfaInterfaceCount
-          - PlacementGroupName
-      - Label:
           default: Monitoring configuration
         Parameters:
           - DeployMonitoring
@@ -55,14 +59,61 @@ Metadata:
         Parameters:
           - PostInstallScriptUrl
           - PostInstallScriptArgs
-          - GpuHealthCheck
-      - Label:
-          default: Multi-user directory (optional)
-        Parameters:
-          - DirectoryRole
-          - DirectoryDomainSuffix
 
 Parameters:
+  PurchaseOption:
+    Type: String
+    Description: >-
+      How EC2 instances are purchased for this node group. ONDEMAND (default) uses
+      On-Demand capacity in a cluster placement group. SPOT uses interruptible Spot
+      capacity (no placement group; see SpotAllocationStrategy) — cheaper but the
+      instances can be reclaimed at any time. CAPACITY_BLOCK launches against a
+      Capacity Block for ML reservation (set CapacityReservationId).
+    Default: ONDEMAND
+    AllowedValues:
+      - ONDEMAND
+      - SPOT
+      - CAPACITY_BLOCK
+
+  SpotAllocationStrategy:
+    Type: String
+    Description: >-
+      EC2 Spot allocation strategy AWS PCS uses when PurchaseOption=SPOT. Ignored
+      for ONDEMAND / CAPACITY_BLOCK. price-capacity-optimized (default) balances
+      lowest price with the deepest, least-interrupted pools (recommended).
+    Default: price-capacity-optimized
+    AllowedValues:
+      - lowest-price
+      - capacity-optimized
+      - price-capacity-optimized
+
+  UsePlacementGroup:
+    Type: String
+    Description: >-
+      Launch On-Demand nodes into a cluster placement group (lowest inter-node
+      latency for tightly-coupled multi-node jobs). 'true' (default) preserves the
+      original behavior. A cluster placement group requires all instances to land in
+      one tight physical group, which can trigger InsufficientInstanceCapacity (ICE)
+      for scarce GPU types like g6e even when the AZ has capacity — so set 'false' to
+      relax placement and improve On-Demand launch success (recommended for
+      single-node jobs, or when you hit ICE). No effect on Spot or Capacity Block,
+      which never use a placement group here.
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  CapacityReservationId:
+    Type: String
+    Description: >-
+      (Optional) Capacity Block for ML reservation ID. Used only when
+      PurchaseOption=CAPACITY_BLOCK; the node group then launches with
+      MarketType=capacity-block against this reservation. Leave EMPTY for On-Demand
+      / Spot. NOTE: this is for Capacity Blocks ONLY — do not put an On-Demand
+      Capacity Reservation (ODCR) ID here. An ODCR with "open" matching is consumed
+      automatically by On-Demand launches, so for ODCR leave this empty.
+    Default: ""
+
   ClusterId:
     Type: String
     Description: Cluster ID (actual PCS cluster ID like pcs_xxxxx)
@@ -74,6 +125,7 @@ Parameters:
   CngName:
     Type: String
     Description: Name for Compute Node Group
+    Default: "gpu-g6e-half"
 
   QueueName:
     Type: String
@@ -82,14 +134,23 @@ Parameters:
 
   InstanceType:
     Type: String
-    Description: Instance Type for Compute Node Group
+    Description: >-
+      Instance type for the compute node group. Locked to g6e.24xlarge: the
+      NetworkInterfaces block below is hand-built for exactly this size's EFA
+      layout (2 network cards, both EFA), so a different type would launch with
+      the wrong NIC topology. The 4-card g6e.48xlarge uses add-cng-g6e.yaml; other
+      GPU families have their own templates (add-cng-p5.yaml, add-cng-p6-b200.yaml,
+      add-cng-p6-b300.yaml).
+    Default: "g6e.24xlarge"
+    AllowedValues:
+      - g6e.24xlarge
 
   RootVolumeSize:
     Type: Number
     Description: >-
-      Root EBS volume size (GiB) for nodes. The PCS-Ready DLAMI default (~75 GiB) is
-      too small for pulling/importing large container images; 300 GiB gives ample
-      headroom.
+      Root EBS volume size (GiB) for compute nodes. The PCS-Ready DLAMI default (~75
+      GiB) is too small for pulling/importing large container images (Enroot/Pyxis
+      squashfs, Megatron ~20 GB). 300 GiB gives ample headroom.
     Default: 300
     MinValue: 75
 
@@ -118,14 +179,6 @@ Parameters:
   ClusterSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: Select SecurityGroup for Compute Node Group for Cluster Communication
-
-  ExtraSecurityGroupId:
-    Type: String
-    Description: >-
-      (Optional) An additional security group ID to attach to these nodes (in
-      addition to ClusterSecurityGroupId). Used e.g. to expose Grafana on a login
-      node to a specific CIDR. Leave empty to attach only the cluster security group.
-    Default: ""
 
   IamProfileArn:
     Type: String
@@ -194,11 +247,8 @@ Parameters:
     Description: >-
       Optional URL of a post-install script to download and run on each node at
       first boot (PCS equivalent of ParallelCluster OnNodeConfigured). Leave
-      empty to skip. Accepts an s3:// URL (fetched with the instance role — works
-      with a private bucket) or an http(s):// URL (fetched with curl — public
-      only, e.g. a GitHub raw URL). To install Enroot/Pyxis, point this at
-      scripts/install-enroot-pyxis.sh in your templates bucket
-      (s3://<bucket>/<prefix>scripts/install-enroot-pyxis.sh).
+      empty to skip. To install Enroot/Pyxis, point this at assets/scripts/install-enroot-pyxis.sh.
+      Accepts an s3:// URL (instance-role fetch; private bucket OK) or an http(s):// URL (curl; public only). For Enroot/Pyxis point at scripts/install-enroot-pyxis.sh in the templates bucket.
     Default: ''
 
   PostInstallScriptArgs:
@@ -215,7 +265,7 @@ Parameters:
       /opt/aws/pcs/gpu-healthcheck at first boot, where the cluster-wide Prolog
       (set by cluster.yaml's matching GpuHealthCheck=prolog) invokes it. Set this on
       GPU compute node groups; the prolog itself is GPU-aware and no-ops on non-GPU
-      nodes, so installing on CPU/login groups is optional. 'none' (default) skips install.
+      nodes. 'none' (default) skips install.
     Default: 'none'
     AllowedValues:
       - 'none'
@@ -264,57 +314,29 @@ Parameters:
     Description: S3 key prefix for scripts (e.g. templates/)
     Default: 'templates/'
 
-  EfaInterfaceCount:
-    Type: Number
-    Description: >-
-      Number of Elastic Fabric Adapter (EFA) network interfaces on the compute
-      nodes. 0 (default) = no EFA (standard ENA networking). 1 or 2 = enable EFA
-      with that many interfaces: the LaunchTemplate switches to a NetworkInterfaces
-      block with InterfaceType=efa and a cluster placement group is wired in
-      (auto-created unless PlacementGroupName is supplied). Set the count to the
-      instance type's MaximumEfaInterfaces — hpc8a.96xlarge / hpc7a.* /
-      hpc6id.32xlarge = 2; hpc6a.48xlarge / c7i.metal = 1. EFA requires an
-      EFA-capable type; a non-EFA type (e.g. c6i.4xlarge) fails to launch with
-      count > 0. For multi-NIC GPU families (P5/P6) use the dedicated
-      add-cng-p5/p6-* templates instead.
-    Default: 0
-    AllowedValues: [0, 1, 2]
-
-  PlacementGroupName:
-    Type: String
-    Description: >-
-      (Optional) Name of an existing cluster placement group to launch nodes into.
-      Leave empty to auto-create a per-CNG cluster placement group when
-      EfaInterfaceCount > 0. Specify a value to share one placement group across
-      multiple CNGs (e.g. a heterogeneous tightly-coupled job). Ignored when
-      EfaInterfaceCount = 0.
-    Default: ''
-
 Conditions:
+  # Purchasing mode is driven by PurchaseOption (single source of truth), not by
+  # whether CapacityReservationId happens to be set.
+  UseCapacityBlock: !Equals [!Ref PurchaseOption, 'CAPACITY_BLOCK']
+  UseSpot: !Equals [!Ref PurchaseOption, 'SPOT']
+  UseOnDemand: !Equals [!Ref PurchaseOption, 'ONDEMAND']
+  # A cluster placement group is created only for On-Demand AND when not disabled.
+  # Relaxing it (UsePlacementGroup=false) can avoid InsufficientInstanceCapacity for
+  # scarce GPU types. Spot/Capacity Block never use a placement group here.
+  CreatePlacementGroup: !And
+    - !Condition UseOnDemand
+    - !Equals [!Ref UsePlacementGroup, 'true']
   CreateQueue: !Not [!Equals [!Ref QueueName, ""]]
   # Emit the monitoring-role tag for both login and compute nodes (any role
   # other than 'none'). The monitoring stack identifies login nodes by this
   # tag (monitoring-role=login) and excludes them from EC2 service discovery.
   IsMonitoringRoleSet: !Not [!Equals [!Ref MonitoringRole, 'none']]
-  HasExtraSecurityGroup: !Not [!Equals [!Ref ExtraSecurityGroupId, ""]]
   HasAmiId: !Not [!Equals [!Ref AmiId, ""]]
-  # EFA is enabled when the interface count is non-zero (0 = standard ENA).
-  EfaEnabled: !Not [!Equals [!Ref EfaInterfaceCount, 0]]
-  HasUserPlacementGroup: !Not [!Equals [!Ref PlacementGroupName, ""]]
-  # Auto-create a per-CNG cluster placement group only when EFA is on AND the
-  # user did not provide one. Override PlacementGroupName to reuse an existing
-  # PG (e.g. a shared one across multiple CNGs).
-  CreatePlacementGroup: !And
-    - !Condition EfaEnabled
-    - !Not [!Condition HasUserPlacementGroup]
-  Has2ndEfaInterface: !Equals [!Ref EfaInterfaceCount, 2]
   DirectoryEnabled: !Not [!Equals [!Ref DirectoryRole, 'none']]
 
 Resources:
 
-  # Cluster placement group for EFA-enabled CPU HPC instances. Created only when
-  # EFA is enabled and the user did not provide an existing PG. Lifecycle is
-  # bound to this CNG stack -- delete the stack and the PG goes with it.
+  # Cluster Placement Group (On-Demand only, and only when UsePlacementGroup=true)
   PlacementGroup:
     Type: AWS::EC2::PlacementGroup
     Condition: CreatePlacementGroup
@@ -345,6 +367,13 @@ Resources:
         - '{{resolve:ssm:/aws/service/pcs/ami/dlami-base-ubuntu2404/x86_64/latest/ami-id}}'
       InstanceConfigs:
         - InstanceType: !Ref InstanceType
+      PurchaseOption: !Ref PurchaseOption
+      # Spot allocation strategy applies only when PurchaseOption=SPOT; PCS rejects
+      # SpotOptions for the other purchasing modes, so omit it otherwise.
+      SpotOptions: !If
+        - UseSpot
+        - AllocationStrategy: !Ref SpotAllocationStrategy
+        - !Ref "AWS::NoValue"
 
   PCSQueueCompute:
     Type: AWS::PCS::Queue
@@ -361,12 +390,26 @@ Resources:
       LaunchTemplateName: !Sub 'PCS-lt-${AWS::StackName}'
 
       LaunchTemplateData:
+        InstanceType: !Ref InstanceType
         BlockDeviceMappings:
           - DeviceName: /dev/sda1
             Ebs:
               VolumeSize: !Ref RootVolumeSize
               VolumeType: gp3
               DeleteOnTermination: true
+        InstanceMarketOptions: !If
+          - UseCapacityBlock
+          - MarketType: capacity-block
+          - !Ref AWS::NoValue
+        CapacityReservationSpecification: !If
+          - UseCapacityBlock
+          - CapacityReservationTarget:
+              CapacityReservationId: !Ref CapacityReservationId
+          - !Ref AWS::NoValue
+        Placement: !If
+          - CreatePlacementGroup
+          - GroupName: !Ref PlacementGroup
+          - !Ref AWS::NoValue
         TagSpecifications:
           - ResourceType: instance
             Tags:
@@ -410,53 +453,6 @@ Resources:
           HttpPutResponseHopLimit: 4
           HttpTokens: required
           InstanceMetadataTags: enabled
-        # Cluster placement group, only when EFA is enabled. Either the auto-created
-        # PG (CreatePlacementGroup) or a user-supplied one (PlacementGroupName).
-        Placement: !If
-          - EfaEnabled
-          - GroupName: !If
-              - CreatePlacementGroup
-              - !Ref PlacementGroup
-              - !Ref PlacementGroupName
-          - !Ref AWS::NoValue
-        # When EFA is enabled, switch to NetworkInterfaces (mutually exclusive with
-        # SecurityGroupIds at the LaunchTemplateData level). The cluster
-        # SecurityGroup created by ml-cluster-prerequisites already includes
-        # self-referencing all-protocol ingress/egress (EFASecurityGroupIngress/
-        # EFASecurityGroupEgress), which is the EFA wire protocol requirement.
-        # When EFA is disabled, keep the simpler SecurityGroupIds form so existing
-        # deployments are unaffected.
-        SecurityGroupIds: !If
-          - EfaEnabled
-          - !Ref AWS::NoValue
-          - !If
-            - HasExtraSecurityGroup
-            - - !Ref ClusterSecurityGroupId
-              - !Ref ExtraSecurityGroupId
-            - - !Ref ClusterSecurityGroupId
-        NetworkInterfaces: !If
-          - EfaEnabled
-          - - Description: Primary EFA interface
-              DeviceIndex: 0
-              NetworkCardIndex: 0
-              InterfaceType: efa
-              SubnetId: !Ref SubnetId
-              Groups: !If
-                - HasExtraSecurityGroup
-                - - !Ref ClusterSecurityGroupId
-                  - !Ref ExtraSecurityGroupId
-                - - !Ref ClusterSecurityGroupId
-            - !If
-              - Has2ndEfaInterface
-              - Description: Second EFA interface
-                DeviceIndex: 1
-                NetworkCardIndex: 1
-                InterfaceType: efa
-                SubnetId: !Ref SubnetId
-                Groups:
-                  - !Ref ClusterSecurityGroupId
-              - !Ref AWS::NoValue
-          - !Ref AWS::NoValue
         UserData:
           Fn::Base64: !Sub |
             MIME-Version: 1.0
@@ -465,15 +461,10 @@ Resources:
             --==MYBOUNDARY==
             Content-Type: text/cloud-config; charset="us-ascii"
             MIME-Version: 1.0
-            
+
             runcmd:
             # Post-install script (optional) - generic OnNodeConfigured-style hook.
             # Downloads and runs a user-supplied script (e.g. Enroot/Pyxis install).
-            # Accepts BOTH an s3:// URL (fetched with `aws s3 cp` using the instance
-            # role — works with a PRIVATE bucket, the default for Enroot/Pyxis) and an
-            # http(s):// URL (fetched anonymously with curl — for public GitHub raw or
-            # any user-hosted script). Pick by scheme so dev accounts without public S3
-            # still install Enroot/Pyxis from their own private templates bucket.
             - |
               if [ -n "${PostInstallScriptUrl}" ]; then
                 echo "Downloading post-install script from ${PostInstallScriptUrl}..." | tee /var/log/pcs-post-install.log
@@ -493,9 +484,7 @@ Resources:
               fi
             # GPU health-check suite (optional). When GpuHealthCheck != none, fetch the
             # suite tarball from the templates bucket and extract to a FIXED path that the
-            # cluster-wide Slurm Prolog (set in cluster.yaml) references. The prolog is
-            # GPU-aware and no-ops on non-GPU nodes, so this is only worth installing on
-            # GPU compute node groups.
+            # cluster-wide Slurm Prolog (set in cluster.yaml) references.
             - |
               if [ "${GpuHealthCheck}" != "none" ]; then
                 echo "Installing GPU health-check suite..." | tee /var/log/pcs-gpu-healthcheck-install.log
@@ -567,39 +556,28 @@ Resources:
                 export S3_KEY_PREFIX="${S3KeyPrefix}"
                 aws s3 cp s3://${S3BucketName}/${S3KeyPrefix}scripts/setup-directory.sh /tmp/setup-directory.sh
                 chmod +x /tmp/setup-directory.sh
-                # Capture the script's REAL exit code so a failed LDAP client
-                # setup is VISIBLE in the log instead of being masked. The old
-                # `... | tee logfile` form returned tee's status (always 0), so a
-                # failure (e.g. discovery exhausting its retries) looked
-                # successful and left no signal. We redirect to the log instead
-                # of piping so $? is the script's own exit code. (cloud-init
-                # runcmd runs under /bin/sh, so PIPESTATUS / bash arrays are
-                # unavailable here — a bashism would die with "Bad substitution"
-                # before slurmd even starts.)
-                #
-                # We deliberately do NOT drain the node on failure:
-                #  - Slurm launches jobs by numeric UID, so a job still RUNS even
-                #    if the user can't be name-resolved on this node (verified on
-                #    real hardware); a missing directory client is a degradation,
-                #    not a hard job failure.
-                #  - Auto-draining a fresh node would risk a launch/drain/replace
-                #    loop: PCS replaces the "unhealthy" node, the replacement hits
-                #    the same condition and drains again. Log-and-continue is the
-                #    safe choice; an operator can act on the logged ERROR.
-                bash /tmp/setup-directory.sh "${DirectoryRole}" > /var/log/directory-setup.log 2>&1
-                dir_rc=$?
-                echo "directory setup exited $dir_rc" >> /var/log/directory-setup.log
-                if [ "$dir_rc" -ne 0 ]; then
-                  if [ "${DirectoryRole}" = "client" ]; then
-                    echo "ERROR: LDAP client setup failed (exit $dir_rc). The node will still join and run jobs (Slurm uses numeric UIDs), but user name resolution / home-dir creation may be degraded on this node. Check this log and the directory server; not draining (avoids a replace loop)." >> /var/log/directory-setup.log
-                  else
-                    echo "ERROR: LDAP server (login-node) setup failed (exit $dir_rc) — the directory service may be unavailable cluster-wide; compute nodes will not be able to resolve directory users. Check this log." >> /var/log/directory-setup.log
-                  fi
-                fi
+                bash /tmp/setup-directory.sh "${DirectoryRole}" 2>&1 | tee /var/log/directory-setup.log
               fi
 
             --==MYBOUNDARY==
-
+        NetworkInterfaces:
+          # g6e.24xlarge supports EFA on both network cards (MaxEfaInterfaces=2),
+          # so each card uses InterfaceType: efa for maximum EFA bandwidth.
+          # Primary is network card 0, device index 0; the second is device index 1.
+          # PCS requires InterfaceType: efa (not efa-only) to propagate correctly.
+          - Description: Primary network interface
+            DeviceIndex: 0
+            InterfaceType: efa
+            NetworkCardIndex: 0
+            SubnetId: !Ref SubnetId
+            Groups:
+            - !Ref ClusterSecurityGroupId
+          - DeviceIndex: 1
+            InterfaceType: efa
+            NetworkCardIndex: 1
+            SubnetId: !Ref SubnetId
+            Groups:
+            - !Ref ClusterSecurityGroupId
 Outputs:
   NodeGroupId:
     Description: Compute Node Group ID
@@ -608,10 +586,12 @@ Outputs:
     Condition: CreateQueue
     Description: Queue ID
     Value: !GetAtt PCSQueueCompute.Id
-  PlacementGroupName:
-    Condition: CreatePlacementGroup
-    Description: >-
-      Auto-created cluster placement group name. Pass this as
-      PlacementGroupName to another add-cng stack to share the PG across CNGs
-      (e.g. heterogeneous tightly-coupled jobs).
-    Value: !Ref PlacementGroup
+  LaunchTemplateId:
+    Description: Launch template Id
+    Value: !Ref PCSLaunchTemplate
+  DefaultVersionNumber:
+    Description: Default version number
+    Value: !GetAtt PCSLaunchTemplate.DefaultVersionNumber
+  LatestVersionNumber:
+    Description: Latest version number
+    Value: !GetAtt PCSLaunchTemplate.DefaultVersionNumber

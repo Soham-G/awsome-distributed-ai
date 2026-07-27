@@ -26,8 +26,31 @@ log_prolog() {
     echo "[gpu-healthcheck-prolog] $*" >&2
 }
 
+# ─── GPU presence gate ───────────────────────────────────────────────────────
+# Slurm's Prolog is cluster-wide (slurm.conf), and AWS PCS only supports Prolog at the
+# cluster level (not per compute node group). So on a mixed cluster (e.g. a cpu1 queue +
+# a GPU queue) this prolog also fires on CPU/login nodes, where the GPU checks would fail
+# and wrongly drain the node. Detect GPU presence first and cleanly skip (exit 0) on
+# non-GPU nodes — this is what makes a single cluster-wide Prolog safe and effectively
+# scopes the health check to GPU node groups only.
+node_has_gpu() {
+    # Prefer a PCI scan (works even if the driver/nvidia-smi is broken — which is exactly
+    # the failure we want to CATCH on a GPU node, not skip). Fall back to nvidia-smi.
+    if command -v lspci >/dev/null 2>&1; then
+        lspci -d 10de: 2>/dev/null | grep -qiE '3d controller|vga|nvidia' && return 0
+    fi
+    [[ -e /dev/nvidia0 ]] && return 0
+    command -v nvidia-smi >/dev/null 2>&1 && return 0
+    return 1
+}
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 main() {
+    if ! node_has_gpu; then
+        log_prolog "No GPU detected on $(hostname) — skipping GPU health check prolog (exit 0)"
+        exit 0
+    fi
+
     log_prolog "Starting GPU health check prolog for job ${SLURM_JOB_ID:-unknown}"
     log_prolog "Node: $(hostname), User: ${SLURM_JOB_USER:-unknown}"
 

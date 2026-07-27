@@ -29,6 +29,7 @@ Metadata:
           - SSHAccessCidr
           - ManagedAccounting
           - AccountingPolicyEnforcement
+          - GpuHealthCheck
       - Label:
           default: "3. On-Demand Compute Node Group"
         Parameters:
@@ -51,26 +52,58 @@ Metadata:
           - PseriesCngName
           - PseriesQueueName
       - Label:
-          default: "4b. GPU Queues - g7e (Optional): full=48xlarge, half=24xlarge, each On-Demand and Spot"
+          default: "4b. GPU Queues - g7 (primary AZ): full=48xlarge (2-NIC EFA), half=24xlarge (1-NIC EFA), On-Demand"
+        Parameters:
+          - DeployG7Full
+          - G7FullName
+          - G7FullMinCount
+          - G7FullMaxCount
+          - DeployG7Half
+          - G7HalfName
+          - G7HalfMinCount
+          - G7HalfMaxCount
+      - Label:
+          default: "4c. GPU Queues - g7e (primary AZ + AZ2): full=48xlarge (4-NIC EFA), half=24xlarge (2-NIC EFA), On-Demand. -az2 queues REQUIRE AdditionalSubnetAZ2"
         Parameters:
           - DeployG7eFull
           - G7eFullName
           - G7eFullMinCount
           - G7eFullMaxCount
-          - DeployG7eFullSpot
-          - G7eFullSpotName
-          - G7eFullSpotMinCount
-          - G7eFullSpotMaxCount
           - DeployG7eHalf
           - G7eHalfName
           - G7eHalfMinCount
           - G7eHalfMaxCount
-          - DeployG7eHalfSpot
-          - G7eHalfSpotName
-          - G7eHalfSpotMinCount
-          - G7eHalfSpotMaxCount
-          - G7eUsePlacementGroup
-          - G7eSpotAllocationStrategy
+          - DeployG7eFullAz2
+          - G7eFullAz2Name
+          - G7eFullAz2MinCount
+          - G7eFullAz2MaxCount
+          - DeployG7eHalfAz2
+          - G7eHalfAz2Name
+          - G7eHalfAz2MinCount
+          - G7eHalfAz2MaxCount
+      - Label:
+          default: "4d. GPU Queues - g6e (AZ2 + AZ3): full=48xlarge (4-NIC EFA), half=24xlarge (2-NIC EFA), On-Demand. REQUIRE AdditionalSubnetAZ2 / AdditionalSubnetAZ3"
+        Parameters:
+          - DeployG6eFullAz2
+          - G6eFullAz2Name
+          - G6eFullAz2MinCount
+          - G6eFullAz2MaxCount
+          - DeployG6eHalfAz2
+          - G6eHalfAz2Name
+          - G6eHalfAz2MinCount
+          - G6eHalfAz2MaxCount
+          - DeployG6eFullAz3
+          - G6eFullAz3Name
+          - G6eFullAz3MinCount
+          - G6eFullAz3MaxCount
+          - DeployG6eHalfAz3
+          - G6eHalfAz3Name
+          - G6eHalfAz3MinCount
+          - G6eHalfAz3MaxCount
+      - Label:
+          default: "4e. Shared GPU queue setting"
+        Parameters:
+          - GpuUsePlacementGroup
       - Label:
           default: "5. Additional Cluster Configuration (Monitoring, Multi-User, Container Runtime)"
         Parameters:
@@ -169,42 +202,94 @@ Metadata:
         default: "GPU node group name"
       PseriesQueueName:
         default: "GPU queue name"
+      # g7 (primary AZ)
+      DeployG7Full:
+        default: "Deploy g7 full (48xlarge) queue"
+      G7FullName:
+        default: "g7 full queue/node-group name"
+      G7FullMinCount:
+        default: "g7 full min nodes"
+      G7FullMaxCount:
+        default: "g7 full max nodes"
+      DeployG7Half:
+        default: "Deploy g7 half (24xlarge) queue"
+      G7HalfName:
+        default: "g7 half queue/node-group name"
+      G7HalfMinCount:
+        default: "g7 half min nodes"
+      G7HalfMaxCount:
+        default: "g7 half max nodes"
+      # g7e (primary AZ)
       DeployG7eFull:
-        default: "Deploy g7e full (48xlarge) On-Demand queue"
+        default: "Deploy g7e full (48xlarge) queue (primary AZ)"
       G7eFullName:
-        default: "g7e full On-Demand queue/node-group name"
+        default: "g7e full queue/node-group name"
       G7eFullMinCount:
-        default: "g7e full On-Demand min nodes"
+        default: "g7e full min nodes"
       G7eFullMaxCount:
-        default: "g7e full On-Demand max nodes"
-      DeployG7eFullSpot:
-        default: "Deploy g7e full (48xlarge) Spot queue"
-      G7eFullSpotName:
-        default: "g7e full Spot queue/node-group name"
-      G7eFullSpotMinCount:
-        default: "g7e full Spot min nodes"
-      G7eFullSpotMaxCount:
-        default: "g7e full Spot max nodes"
+        default: "g7e full max nodes"
       DeployG7eHalf:
-        default: "Deploy g7e half (24xlarge) On-Demand queue"
+        default: "Deploy g7e half (24xlarge) queue (primary AZ)"
       G7eHalfName:
-        default: "g7e half On-Demand queue/node-group name"
+        default: "g7e half queue/node-group name"
       G7eHalfMinCount:
-        default: "g7e half On-Demand min nodes"
+        default: "g7e half min nodes"
       G7eHalfMaxCount:
-        default: "g7e half On-Demand max nodes"
-      DeployG7eHalfSpot:
-        default: "Deploy g7e half (24xlarge) Spot queue"
-      G7eHalfSpotName:
-        default: "g7e half Spot queue/node-group name"
-      G7eHalfSpotMinCount:
-        default: "g7e half Spot min nodes"
-      G7eHalfSpotMaxCount:
-        default: "g7e half Spot max nodes"
-      G7eUsePlacementGroup:
-        default: "g7e On-Demand: use cluster placement group (false relaxes for capacity)"
-      G7eSpotAllocationStrategy:
-        default: "g7e Spot allocation strategy"
+        default: "g7e half max nodes"
+      # g7e (AZ2 — requires AdditionalSubnetAZ2)
+      DeployG7eFullAz2:
+        default: "Deploy g7e full queue in AZ2 (requires AdditionalSubnetAZ2)"
+      G7eFullAz2Name:
+        default: "g7e full AZ2 queue/node-group name"
+      G7eFullAz2MinCount:
+        default: "g7e full AZ2 min nodes"
+      G7eFullAz2MaxCount:
+        default: "g7e full AZ2 max nodes"
+      DeployG7eHalfAz2:
+        default: "Deploy g7e half queue in AZ2 (requires AdditionalSubnetAZ2)"
+      G7eHalfAz2Name:
+        default: "g7e half AZ2 queue/node-group name"
+      G7eHalfAz2MinCount:
+        default: "g7e half AZ2 min nodes"
+      G7eHalfAz2MaxCount:
+        default: "g7e half AZ2 max nodes"
+      # g6e (AZ2 — requires AdditionalSubnetAZ2)
+      DeployG6eFullAz2:
+        default: "Deploy g6e full queue in AZ2 (requires AdditionalSubnetAZ2)"
+      G6eFullAz2Name:
+        default: "g6e full AZ2 queue/node-group name"
+      G6eFullAz2MinCount:
+        default: "g6e full AZ2 min nodes"
+      G6eFullAz2MaxCount:
+        default: "g6e full AZ2 max nodes"
+      DeployG6eHalfAz2:
+        default: "Deploy g6e half queue in AZ2 (requires AdditionalSubnetAZ2)"
+      G6eHalfAz2Name:
+        default: "g6e half AZ2 queue/node-group name"
+      G6eHalfAz2MinCount:
+        default: "g6e half AZ2 min nodes"
+      G6eHalfAz2MaxCount:
+        default: "g6e half AZ2 max nodes"
+      # g6e (AZ3 — requires AdditionalSubnetAZ3)
+      DeployG6eFullAz3:
+        default: "Deploy g6e full queue in AZ3 (requires AdditionalSubnetAZ3)"
+      G6eFullAz3Name:
+        default: "g6e full AZ3 queue/node-group name"
+      G6eFullAz3MinCount:
+        default: "g6e full AZ3 min nodes"
+      G6eFullAz3MaxCount:
+        default: "g6e full AZ3 max nodes"
+      DeployG6eHalfAz3:
+        default: "Deploy g6e half queue in AZ3 (requires AdditionalSubnetAZ3)"
+      G6eHalfAz3Name:
+        default: "g6e half AZ3 queue/node-group name"
+      G6eHalfAz3MinCount:
+        default: "g6e half AZ3 min nodes"
+      G6eHalfAz3MaxCount:
+        default: "g6e half AZ3 max nodes"
+      # shared
+      GpuUsePlacementGroup:
+        default: "GPU On-Demand: use cluster placement group (false relaxes for capacity)"
       Capacity:
         default: "FSx for Lustre (/fsx) capacity (GiB)"
       LustreDeploymentType:
@@ -446,6 +531,19 @@ Parameters:
       - none
       - 'associations,limits,safe'
 
+  GpuHealthCheck:
+    Type: String
+    Description: >-
+      Enable the GPU health-check Slurm prolog. 'prolog' sets a cluster-wide Slurm
+      Prolog that runs fast GPU/EFA checks (nvidia-smi + EFA enumeration, ~8s) before
+      each job and drains the node + requeues the job on failure. The prolog is
+      GPU-aware (no-ops on CPU/login nodes), and the health-check suite is installed on
+      the GPU compute node group at first boot. 'none' (default) disables it.
+    Default: 'none'
+    AllowedValues:
+      - 'none'
+      - 'prolog'
+
   LoginNodeInstanceType:
     Type: String
     Description: Instance Type for Login Node Group
@@ -513,8 +611,12 @@ Parameters:
   # On-Demand Compute Node Group
   DeployOnDemandCNG:
     Type: String
-    Description: Deploy on-demand compute node group
-    Default: 'true'
+    Description: >-
+      Deploy the on-demand CPU compute node group. Default 'false': AWS PCS caps a
+      cluster at 10 compute node groups (non-adjustable), and the login node group plus
+      the default GPU queues already reach that cap, so the CPU queue is off by default.
+      Enable it only if you also disable a GPU queue to stay within 10 node groups.
+    Default: 'false'
     AllowedValues:
       - 'true'
       - 'false'
@@ -632,125 +734,251 @@ Parameters:
       leave this empty.
 
   # ---------------------------------------------------------------------------
-  # g7e GPU queues (section 4b). Four independent, separately-toggleable queues:
-  #   full      = g7e.48xlarge On-Demand  (8 GPUs, 4-NIC EFA, add-cng-g7e.yaml)
-  #   full-spot = g7e.48xlarge Spot        (same template, PurchaseOption=SPOT)
-  #   half      = g7e.24xlarge On-Demand  (4 GPUs, 2-NIC EFA, add-cng-g7e-24xl.yaml)
-  #   half-spot = g7e.24xlarge Spot        (same 24xl template, PurchaseOption=SPOT)
-  # Deploy any combination. Independent of DeployPseriesCNG (P5/P6) above.
+  # GPU queues (sections 4b-4e). Ten independent, separately-toggleable On-Demand
+  # queues across three families, each placed in the AZ where that family has the
+  # best capacity. Each queue is single-AZ (multi-NIC EFA pins the subnet per NIC,
+  # so a queue cannot span AZs while keeping EFA). Every full = 48xlarge, half =
+  # 24xlarge. Independent of DeployPseriesCNG (P5/P6) above.
+  #   g7  full/half            -> primary AZ            (add-cng-g7.yaml / add-cng-g7-24xl.yaml)
+  #   g7e full/half            -> primary AZ            (add-cng-g7e.yaml / add-cng-g7e-24xl.yaml)
+  #   g7e full/half (-az2)     -> AdditionalSubnetAZ2   (same g7e templates)
+  #   g6e full/half (-az2)     -> AdditionalSubnetAZ2   (add-cng-g6e.yaml / add-cng-g6e-24xl.yaml)
+  #   g6e full/half (-az3)     -> AdditionalSubnetAZ3   (same g6e templates)
+  # All default 'true'; MinCount stays 0 so nodes launch only when a job is
+  # submitted. The AZ2/AZ3 queues additionally require their AdditionalSubnetAZ*
+  # to be set (they self-skip otherwise — see Conditions).
   # ---------------------------------------------------------------------------
 
-  # --- g7e full (48xlarge) On-Demand ---
+  # --- g7 full (48xlarge, 2-NIC EFA) primary AZ ---
+  DeployG7Full:
+    Type: String
+    Description: Deploy the g7.48xlarge (full, 8-GPU) On-Demand queue in the primary AZ
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7FullName:
+    Type: String
+    Description: Node group + queue name for the g7 full queue
+    Default: "gpu-g7-full"
+  G7FullMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7 full queue
+    Default: 2
+    MinValue: 0
+  G7FullMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7 full queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7 half (24xlarge, 1-NIC EFA) primary AZ ---
+  DeployG7Half:
+    Type: String
+    Description: >-
+      Deploy the g7.24xlarge (half, 4-GPU) On-Demand queue in the primary AZ. Default
+      'false': PCS caps a cluster at 10 compute node groups (non-adjustable), and login
+      + the other 9 GPU queues reach that cap, so this queue is off by default (g7-full
+      still covers the g7 family in the primary AZ). Enable it only if you disable
+      another queue to stay within 10 node groups.
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7HalfName:
+    Type: String
+    Description: Node group + queue name for the g7 half queue
+    Default: "gpu-g7-half"
+  G7HalfMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7 half queue
+    Default: 2
+    MinValue: 0
+  G7HalfMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7 half queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e full (48xlarge, 4-NIC EFA) primary AZ ---
   DeployG7eFull:
     Type: String
-    Description: Deploy the g7e.48xlarge (full, 8-GPU) On-Demand queue
-    Default: 'false'
+    Description: Deploy the g7e.48xlarge (full, 8-GPU) On-Demand queue in the primary AZ
+    Default: 'true'
     AllowedValues: ['true', 'false']
   G7eFullName:
     Type: String
-    Description: Node group + queue name for the g7e full On-Demand queue
+    Description: Node group + queue name for the g7e full queue
     Default: "gpu-g7e-full"
   G7eFullMaxCount:
     Type: Number
-    Description: Maximum number of instances for the g7e full On-Demand queue
+    Description: Maximum number of instances for the g7e full queue
     Default: 2
     MinValue: 0
   G7eFullMinCount:
     Type: Number
-    Description: Minimum number of instances for the g7e full On-Demand queue (0 for dynamic scaling)
+    Description: Minimum number of instances for the g7e full queue (0 for dynamic scaling)
     Default: 0
     MinValue: 0
 
-  # --- g7e full (48xlarge) Spot ---
-  DeployG7eFullSpot:
-    Type: String
-    Description: Deploy the g7e.48xlarge (full, 8-GPU) Spot queue
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-  G7eFullSpotName:
-    Type: String
-    Description: Node group + queue name for the g7e full Spot queue
-    Default: "gpu-g7e-full-spot"
-  G7eFullSpotMaxCount:
-    Type: Number
-    Description: Maximum number of instances for the g7e full Spot queue
-    Default: 2
-    MinValue: 0
-  G7eFullSpotMinCount:
-    Type: Number
-    Description: Minimum number of instances for the g7e full Spot queue (0 for dynamic scaling)
-    Default: 0
-    MinValue: 0
-
-  # --- g7e half (24xlarge) On-Demand ---
+  # --- g7e half (24xlarge, 2-NIC EFA) primary AZ ---
   DeployG7eHalf:
     Type: String
-    Description: Deploy the g7e.24xlarge (half, 4-GPU) On-Demand queue
-    Default: 'false'
+    Description: Deploy the g7e.24xlarge (half, 4-GPU) On-Demand queue in the primary AZ
+    Default: 'true'
     AllowedValues: ['true', 'false']
   G7eHalfName:
     Type: String
-    Description: Node group + queue name for the g7e half On-Demand queue
+    Description: Node group + queue name for the g7e half queue
     Default: "gpu-g7e-half"
   G7eHalfMaxCount:
     Type: Number
-    Description: Maximum number of instances for the g7e half On-Demand queue
+    Description: Maximum number of instances for the g7e half queue
     Default: 2
     MinValue: 0
   G7eHalfMinCount:
     Type: Number
-    Description: Minimum number of instances for the g7e half On-Demand queue (0 for dynamic scaling)
+    Description: Minimum number of instances for the g7e half queue (0 for dynamic scaling)
     Default: 0
     MinValue: 0
 
-  # --- g7e half (24xlarge) Spot ---
-  DeployG7eHalfSpot:
+  # --- g7e full (48xlarge, 4-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG7eFullAz2:
     Type: String
-    Description: Deploy the g7e.24xlarge (half, 4-GPU) Spot queue
-    Default: 'false'
+    Description: Deploy the g7e.48xlarge (full, 8-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
     AllowedValues: ['true', 'false']
-  G7eHalfSpotName:
+  G7eFullAz2Name:
     Type: String
-    Description: Node group + queue name for the g7e half Spot queue
-    Default: "gpu-g7e-half-spot"
-  G7eHalfSpotMaxCount:
+    Description: Node group + queue name for the g7e full AZ2 queue
+    Default: "gpu-g7e-full-az2"
+  G7eFullAz2MaxCount:
     Type: Number
-    Description: Maximum number of instances for the g7e half Spot queue
+    Description: Maximum number of instances for the g7e full AZ2 queue
     Default: 2
     MinValue: 0
-  G7eHalfSpotMinCount:
+  G7eFullAz2MinCount:
     Type: Number
-    Description: Minimum number of instances for the g7e half Spot queue (0 for dynamic scaling)
+    Description: Minimum number of instances for the g7e full AZ2 queue (0 for dynamic scaling)
     Default: 0
     MinValue: 0
 
-  # --- shared g7e knobs (apply to whichever g7e queues are deployed) ---
-  G7eUsePlacementGroup:
+  # --- g7e half (24xlarge, 2-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG7eHalfAz2:
+    Type: String
+    Description: Deploy the g7e.24xlarge (half, 4-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7eHalfAz2Name:
+    Type: String
+    Description: Node group + queue name for the g7e half AZ2 queue
+    Default: "gpu-g7e-half-az2"
+  G7eHalfAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e half AZ2 queue
+    Default: 2
+    MinValue: 0
+  G7eHalfAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e half AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e full (48xlarge, 4-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG6eFullAz2:
+    Type: String
+    Description: Deploy the g6e.48xlarge (full, 8-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eFullAz2Name:
+    Type: String
+    Description: Node group + queue name for the g6e full AZ2 queue
+    Default: "gpu-g6e-full-az2"
+  G6eFullAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e full AZ2 queue
+    Default: 2
+    MinValue: 0
+  G6eFullAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e full AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e half (24xlarge, 2-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG6eHalfAz2:
+    Type: String
+    Description: Deploy the g6e.24xlarge (half, 4-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eHalfAz2Name:
+    Type: String
+    Description: Node group + queue name for the g6e half AZ2 queue
+    Default: "gpu-g6e-half-az2"
+  G6eHalfAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e half AZ2 queue
+    Default: 2
+    MinValue: 0
+  G6eHalfAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e half AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e full (48xlarge, 4-NIC EFA) AZ3 (requires AdditionalSubnetAZ3) ---
+  DeployG6eFullAz3:
+    Type: String
+    Description: Deploy the g6e.48xlarge (full, 8-GPU) On-Demand queue in AZ3 (requires AdditionalSubnetAZ3)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eFullAz3Name:
+    Type: String
+    Description: Node group + queue name for the g6e full AZ3 queue
+    Default: "gpu-g6e-full-az3"
+  G6eFullAz3MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e full AZ3 queue
+    Default: 2
+    MinValue: 0
+  G6eFullAz3MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e full AZ3 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e half (24xlarge, 2-NIC EFA) AZ3 (requires AdditionalSubnetAZ3) ---
+  DeployG6eHalfAz3:
+    Type: String
+    Description: Deploy the g6e.24xlarge (half, 4-GPU) On-Demand queue in AZ3 (requires AdditionalSubnetAZ3)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eHalfAz3Name:
+    Type: String
+    Description: Node group + queue name for the g6e half AZ3 queue
+    Default: "gpu-g6e-half-az3"
+  G6eHalfAz3MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e half AZ3 queue
+    Default: 2
+    MinValue: 0
+  G6eHalfAz3MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e half AZ3 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- shared GPU knob (applies to every On-Demand GPU queue above) ---
+  GpuUsePlacementGroup:
     Type: String
     Description: >-
-      (g7e On-Demand queues only) Launch On-Demand g7e nodes into a cluster placement
-      group. 'true' (default) gives lowest inter-node latency for tightly-coupled
-      multi-node jobs. Set 'false' to relax placement — a cluster placement group
-      requires all instances in one tight physical group, which can cause
-      InsufficientInstanceCapacity for scarce GPU types like g7e even when the AZ has
-      capacity; relaxing it improves On-Demand launch success (recommended for
-      single-node jobs or when you hit capacity errors). No effect on the Spot queues.
+      Launch On-Demand GPU nodes into a cluster placement group. 'true' (default)
+      gives lowest inter-node latency for tightly-coupled multi-node jobs. Set 'false'
+      to relax placement — a cluster placement group requires all instances in one
+      tight physical group, which can cause InsufficientInstanceCapacity for scarce
+      GPU types (g7/g7e/g6e) even when the AZ has capacity; relaxing it improves
+      On-Demand launch success (recommended for single-node jobs or when you hit
+      capacity errors). Applies to all g7/g7e/g6e queues.
     Default: 'true'
     AllowedValues:
       - 'true'
       - 'false'
-
-  G7eSpotAllocationStrategy:
-    Type: String
-    Description: >-
-      EC2 Spot allocation strategy for the g7e Spot queues (full-spot / half-spot).
-      price-capacity-optimized (default) balances lowest price with the deepest,
-      least-interrupted Spot pools (recommended).
-    Default: price-capacity-optimized
-    AllowedValues:
-      - lowest-price
-      - capacity-optimized
-      - price-capacity-optimized
 
   RootVolumeSize:
     Type: Number
@@ -806,6 +1034,51 @@ Rules:
         AssertDescription: >-
           FSxLustreEnableEfa=true requires LustreDeploymentType=PERSISTENT_2
           (EFA on FSx for Lustre is a PERSISTENT_2-only feature).
+  # AWS PCS caps a cluster at 10 compute node groups AND 10 queues, both
+  # non-adjustable internal quotas. The login node group always consumes one node
+  # group slot, so at most 9 GPU/CPU node groups can coexist. The default set is
+  # login + 9 GPU queues = exactly 10 (with AdditionalSubnetAZ2/AZ3 set so all four
+  # -az2/-az3 queues materialize); DeployOnDemandCNG (CPU) and DeployG7Half both
+  # default 'false' to stay at the cap.
+  #
+  # This Rule fails the stack at create time -- with a clear message instead of the
+  # opaque "You have reached the quota: ComputeNodeGroup" rollback ~19 min in -- for
+  # the common footgun: taking the full default GPU set (all 9 on, both extra subnets
+  # provided) and ALSO enabling the CPU queue and/or g7-half, which would be 11+ node
+  # groups. CloudFormation Rules cannot do arithmetic, so this cannot count an
+  # arbitrary toggle combination; it is gated on all 9 default GPU queues being on so
+  # it has ZERO false positives (it never blocks a legitimate <=10 config). Exotic
+  # over-limit combos that disable a default GPU queue but enable two others are not
+  # caught here and still fail at the PCS layer -- keep the total <= 10 node groups.
+  # The condition is nested because Fn::And allows at most 10 operands: the 9
+  # queue toggles are grouped in an inner And, combined with the 2 subnet checks
+  # (subnet checks are required so the Rule does NOT fire when the -az2/-az3 queues
+  # self-skip for lack of a subnet -- that would be a false positive).
+  GpuQueueNodeGroupCap:
+    RuleCondition: !And
+      - !Not [!Equals [!Ref AdditionalSubnetAZ2, ""]]
+      - !Not [!Equals [!Ref AdditionalSubnetAZ3, ""]]
+      - !And
+        - !Equals [!Ref DeployG7Full, 'true']
+        - !Equals [!Ref DeployG7eFull, 'true']
+        - !Equals [!Ref DeployG7eHalf, 'true']
+        - !Equals [!Ref DeployG7eFullAz2, 'true']
+        - !Equals [!Ref DeployG7eHalfAz2, 'true']
+        - !Equals [!Ref DeployG6eFullAz2, 'true']
+        - !Equals [!Ref DeployG6eHalfAz2, 'true']
+        - !Equals [!Ref DeployG6eFullAz3, 'true']
+        - !Equals [!Ref DeployG6eHalfAz3, 'true']
+    Assertions:
+      - Assert: !And
+          - !Equals [!Ref DeployOnDemandCNG, 'false']
+          - !Equals [!Ref DeployG7Half, 'false']
+        AssertDescription: >-
+          The full default GPU set (all 9 g7/g7e/g6e queues, with AdditionalSubnetAZ2
+          and AdditionalSubnetAZ3 set) plus the login node group already reaches the
+          AWS PCS cap of 10 compute node groups per cluster (non-adjustable). Keep
+          DeployOnDemandCNG=false and DeployG7Half=false, or disable one of the GPU
+          queues to make room for them. Total compute node groups (login + CPU + GPU)
+          must not exceed 10.
 
 Conditions:
   UseLocalTemplates: !Equals [!Ref S3BucketName, 'local']
@@ -837,13 +1110,40 @@ Conditions:
     - !Condition DeployPseriesCNGEnabled
     - !Not [!Equals [!Ref PseriesInstanceType, 'p6-b200.48xlarge']]
     - !Not [!Equals [!Ref PseriesInstanceType, 'p6-b300.48xlarge']]
-  # g7e queues — four independent toggles (full/half x On-Demand/Spot), each its
-  # own nested stack. Full = 48xlarge (add-cng-g7e.yaml), half = 24xlarge
-  # (add-cng-g7e-24xl.yaml). Spot queues set PurchaseOption=SPOT on the same template.
+  # GPU queues — ten independent On-Demand toggles across g7/g7e/g6e, each its own
+  # nested stack. Full = 48xlarge, half = 24xlarge. Primary-AZ queues gate on the
+  # toggle alone; AZ2/AZ3 queues additionally require their AdditionalSubnetAZ* to be
+  # set (the pinned subnet output only exists when that subnet is created), so those
+  # queues self-skip instead of failing the stack when the AZ isn't provided.
+  HasSubnetAZ2: !Not [!Equals [!Ref AdditionalSubnetAZ2, ""]]
+  HasSubnetAZ3: !Not [!Equals [!Ref AdditionalSubnetAZ3, ""]]
+  # g7 (primary AZ)
+  DeployG7FullEnabled: !Equals [!Ref DeployG7Full, 'true']
+  DeployG7HalfEnabled: !Equals [!Ref DeployG7Half, 'true']
+  # g7e (primary AZ)
   DeployG7eFullEnabled: !Equals [!Ref DeployG7eFull, 'true']
-  DeployG7eFullSpotEnabled: !Equals [!Ref DeployG7eFullSpot, 'true']
   DeployG7eHalfEnabled: !Equals [!Ref DeployG7eHalf, 'true']
-  DeployG7eHalfSpotEnabled: !Equals [!Ref DeployG7eHalfSpot, 'true']
+  # g7e (AZ2 — needs AdditionalSubnetAZ2)
+  DeployG7eFullAz2Enabled: !And
+    - !Equals [!Ref DeployG7eFullAz2, 'true']
+    - !Condition HasSubnetAZ2
+  DeployG7eHalfAz2Enabled: !And
+    - !Equals [!Ref DeployG7eHalfAz2, 'true']
+    - !Condition HasSubnetAZ2
+  # g6e (AZ2 — needs AdditionalSubnetAZ2)
+  DeployG6eFullAz2Enabled: !And
+    - !Equals [!Ref DeployG6eFullAz2, 'true']
+    - !Condition HasSubnetAZ2
+  DeployG6eHalfAz2Enabled: !And
+    - !Equals [!Ref DeployG6eHalfAz2, 'true']
+    - !Condition HasSubnetAZ2
+  # g6e (AZ3 — needs AdditionalSubnetAZ3)
+  DeployG6eFullAz3Enabled: !And
+    - !Equals [!Ref DeployG6eFullAz3, 'true']
+    - !Condition HasSubnetAZ3
+  DeployG6eHalfAz3Enabled: !And
+    - !Equals [!Ref DeployG6eHalfAz3, 'true']
+    - !Condition HasSubnetAZ3
 
 Resources:
   #############################################################################
@@ -893,6 +1193,7 @@ Resources:
         ManagedAccounting: !Ref ManagedAccounting
         AccountingPolicyEnforcement: !Ref AccountingPolicyEnforcement
         DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-Cluster'
@@ -1077,6 +1378,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
@@ -1125,6 +1427,7 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
@@ -1173,12 +1476,113 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-PseriesCNG'
 
   #############################################################################
-  # 6d. g7e full (48xlarge, 4-NIC EFA) — On-Demand
+  # 6d. g7 full (48xlarge, 2-NIC EFA) — On-Demand, primary AZ
+  #############################################################################
+  G7FullCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7FullEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7FullName
+        QueueName: !Ref G7FullName
+        InstanceType: g7.48xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7FullMaxCount
+        MinCount: !Ref G7FullMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7Full'
+
+  #############################################################################
+  # 6e. g7 half (24xlarge, 1-NIC EFA) — On-Demand, primary AZ
+  #############################################################################
+  G7HalfCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7HalfEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7-24xl.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7-24xl.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7HalfName
+        QueueName: !Ref G7HalfName
+        InstanceType: g7.24xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7HalfMaxCount
+        MinCount: !Ref G7HalfMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7Half'
+
+  #############################################################################
+  # 6f. g7e full (48xlarge, 4-NIC EFA) — On-Demand, primary AZ
   #############################################################################
   G7eFullCNGStack:
     Type: AWS::CloudFormation::Stack
@@ -1206,7 +1610,7 @@ Resources:
         FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
         FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
         PurchaseOption: ONDEMAND
-        UsePlacementGroup: !Ref G7eUsePlacementGroup
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
         DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
         MonitoringVersion: !Ref MonitoringVersion
         MonitoringRepo: !Ref MonitoringRepo
@@ -1222,61 +1626,13 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eFull'
 
   #############################################################################
-  # 6e. g7e full (48xlarge, 4-NIC EFA) — Spot
-  #############################################################################
-  G7eFullSpotCNGStack:
-    Type: AWS::CloudFormation::Stack
-    Condition: DeployG7eFullSpotEnabled
-    DependsOn: ClusterStack
-    Properties:
-      TemplateURL: !If
-        - UseLocalTemplates
-        - add-cng-g7e.yaml
-        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7e.yaml'
-      Parameters:
-        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
-        ClusterName: !Sub '${AWS::StackName}'
-        CngName: !Ref G7eFullSpotName
-        QueueName: !Ref G7eFullSpotName
-        InstanceType: g7e.48xlarge
-        RootVolumeSize: !Ref RootVolumeSize
-        MaxCount: !Ref G7eFullSpotMaxCount
-        MinCount: !Ref G7eFullSpotMinCount
-        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
-        AmiId: !Ref AmiId
-        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
-        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
-        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
-        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
-        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
-        PurchaseOption: SPOT
-        SpotAllocationStrategy: !Ref G7eSpotAllocationStrategy
-        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
-        MonitoringVersion: !Ref MonitoringVersion
-        MonitoringRepo: !Ref MonitoringRepo
-        DcgmExporterImage: !Ref DcgmExporterImage
-        SlurmVersion: !Ref SlurmVersion
-        MonitoringRole: compute
-        PostInstallScriptUrl: !If
-          - PostInstallScriptUrlIsDefault
-          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
-          - !Ref PostInstallScriptUrl
-        PostInstallScriptArgs: !Ref PostInstallScriptArgs
-        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
-        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
-        S3BucketName: !Ref S3BucketName
-        S3KeyPrefix: !Ref S3KeyPrefix
-      Tags:
-        - Key: Name
-          Value: !Sub '${AWS::StackName}-G7eFullSpot'
-
-  #############################################################################
-  # 6f. g7e half (24xlarge, 2-NIC EFA) — On-Demand
+  # 6g. g7e half (24xlarge, 2-NIC EFA) — On-Demand, primary AZ
   #############################################################################
   G7eHalfCNGStack:
     Type: AWS::CloudFormation::Stack
@@ -1304,7 +1660,7 @@ Resources:
         FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
         FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
         PurchaseOption: ONDEMAND
-        UsePlacementGroup: !Ref G7eUsePlacementGroup
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
         DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
         MonitoringVersion: !Ref MonitoringVersion
         MonitoringRepo: !Ref MonitoringRepo
@@ -1320,16 +1676,67 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eHalf'
 
   #############################################################################
-  # 6g. g7e half (24xlarge, 2-NIC EFA) — Spot
+  # 6h. g7e full (48xlarge, 4-NIC EFA) — On-Demand, AZ2
   #############################################################################
-  G7eHalfSpotCNGStack:
+  G7eFullAz2CNGStack:
     Type: AWS::CloudFormation::Stack
-    Condition: DeployG7eHalfSpotEnabled
+    Condition: DeployG7eFullAz2Enabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g7e.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g7e.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eFullAz2Name
+        QueueName: !Ref G7eFullAz2Name
+        InstanceType: g7e.48xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eFullAz2MaxCount
+        MinCount: !Ref G7eFullAz2MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet2
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eFullAz2'
+
+  #############################################################################
+  # 6i. g7e half (24xlarge, 2-NIC EFA) — On-Demand, AZ2
+  #############################################################################
+  G7eHalfAz2CNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eHalfAz2Enabled
     DependsOn: ClusterStack
     Properties:
       TemplateURL: !If
@@ -1339,21 +1746,21 @@ Resources:
       Parameters:
         ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
         ClusterName: !Sub '${AWS::StackName}'
-        CngName: !Ref G7eHalfSpotName
-        QueueName: !Ref G7eHalfSpotName
+        CngName: !Ref G7eHalfAz2Name
+        QueueName: !Ref G7eHalfAz2Name
         InstanceType: g7e.24xlarge
         RootVolumeSize: !Ref RootVolumeSize
-        MaxCount: !Ref G7eHalfSpotMaxCount
-        MinCount: !Ref G7eHalfSpotMinCount
-        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        MaxCount: !Ref G7eHalfAz2MaxCount
+        MinCount: !Ref G7eHalfAz2MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet2
         AmiId: !Ref AmiId
         ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
         IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
         FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
         FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
         FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
-        PurchaseOption: SPOT
-        SpotAllocationStrategy: !Ref G7eSpotAllocationStrategy
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
         DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
         MonitoringVersion: !Ref MonitoringVersion
         MonitoringRepo: !Ref MonitoringRepo
@@ -1369,9 +1776,210 @@ Resources:
         DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
         S3BucketName: !Ref S3BucketName
         S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
       Tags:
         - Key: Name
-          Value: !Sub '${AWS::StackName}-G7eHalfSpot'
+          Value: !Sub '${AWS::StackName}-G7eHalfAz2'
+
+  #############################################################################
+  # 6j. g6e full (48xlarge, 4-NIC EFA) — On-Demand, AZ2
+  #############################################################################
+  G6eFullAz2CNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG6eFullAz2Enabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g6e.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g6e.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G6eFullAz2Name
+        QueueName: !Ref G6eFullAz2Name
+        InstanceType: g6e.48xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G6eFullAz2MaxCount
+        MinCount: !Ref G6eFullAz2MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet2
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G6eFullAz2'
+
+  #############################################################################
+  # 6k. g6e half (24xlarge, 2-NIC EFA) — On-Demand, AZ2
+  #############################################################################
+  G6eHalfAz2CNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG6eHalfAz2Enabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g6e-24xl.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g6e-24xl.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G6eHalfAz2Name
+        QueueName: !Ref G6eHalfAz2Name
+        InstanceType: g6e.24xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G6eHalfAz2MaxCount
+        MinCount: !Ref G6eHalfAz2MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet2
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G6eHalfAz2'
+
+  #############################################################################
+  # 6l. g6e full (48xlarge, 4-NIC EFA) — On-Demand, AZ3
+  #############################################################################
+  G6eFullAz3CNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG6eFullAz3Enabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g6e.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g6e.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G6eFullAz3Name
+        QueueName: !Ref G6eFullAz3Name
+        InstanceType: g6e.48xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G6eFullAz3MaxCount
+        MinCount: !Ref G6eFullAz3MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet3
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G6eFullAz3'
+
+  #############################################################################
+  # 6m. g6e half (24xlarge, 2-NIC EFA) — On-Demand, AZ3
+  #############################################################################
+  G6eHalfAz3CNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG6eHalfAz3Enabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng-g6e-24xl.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng-g6e-24xl.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G6eHalfAz3Name
+        QueueName: !Ref G6eHalfAz3Name
+        InstanceType: g6e.24xlarge
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G6eHalfAz3MaxCount
+        MinCount: !Ref G6eHalfAz3MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet3
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        PurchaseOption: ONDEMAND
+        UsePlacementGroup: !Ref GpuUsePlacementGroup
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        GpuHealthCheck: !Ref GpuHealthCheck
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G6eHalfAz3'
 
 Outputs:
   ClusterId:

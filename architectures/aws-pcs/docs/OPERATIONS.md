@@ -473,3 +473,42 @@ For a new production deploy:
 - Default `DcgmExporterImage` covers H100/B200/B300; override only to pin a different build
 - Minimum-CIDR `GrafanaAccessCidr` if used at all; otherwise empty (SSM port-forward)
 - Throughput values that match the chosen FSx deployment types
+- Consider `GpuHealthCheck=prolog` to catch bad GPU nodes at job launch (see §8)
+
+## 8. GPU health-check prolog (`GpuHealthCheck`)
+
+`GpuHealthCheck=prolog` wires the repo's
+[GPU health-check suite](../../../4.validation_and_observability/2.gpu-cluster-healthcheck)
+into the cluster as a Slurm **Prolog**, so a faulty GPU node is caught *before* a job runs
+on it instead of failing the job (or silently degrading it).
+
+**What it does.** Before each job, slurmd runs `prolog-gpu-healthcheck.sh` on the assigned
+node: check 0 (`nvidia-smi` — driver responsive, GPU count, recent Xid/SXid errors) and
+check 2 (EFA device + libfabric provider enumeration), ~8s total. A non-zero exit makes
+Slurm **drain the node and requeue the job**, so the job transparently lands on a healthy
+node. DCGM L2 (check 1) is opt-in via `GPU_HEALTHCHECK_PROLOG_ENABLE_DCGM=1` (adds minutes).
+
+**Why it's a cluster-wide, GPU-aware prolog.** AWS PCS supports `Prolog` only as a
+*cluster-level* custom Slurm setting (the compute-node-group allowlist is just
+`CpuSpecList`/`Features`/`MemSpecLimit`/`RealMemory`/`Weight` — no `Prolog`). A cluster-wide
+prolog would also fire on CPU/login nodes, where the GPU checks would wrongly drain them.
+So the shipped prolog first detects GPU presence (PCI scan for an NVIDIA device, falling
+back to `nvidia-smi`) and **cleanly exits 0 on non-GPU nodes** — effectively scoping the
+health check to GPU node groups while using the one mechanism PCS allows. The PCI-first
+detection is deliberate: a GPU node whose *driver* has failed still has the NVIDIA PCI
+device, so the prolog still runs there and correctly fails (drains the bad node) — exactly
+the failure mode this catches.
+
+**Mechanics.**
+- `cluster.yaml` sets two SlurmCustomSettings when `GpuHealthCheck=prolog`:
+  `Prolog=/opt/aws/pcs/gpu-healthcheck/slurm/prolog-gpu-healthcheck.sh` and `PrologFlags=Alloc`.
+- `add-cng*.yaml` (set the matching `GpuHealthCheck=prolog` on the GPU node group) fetches
+  `s3://<bucket>/<prefix>gpu-healthcheck/gpu-healthcheck.tar.gz` at first boot and extracts
+  it to `/opt/aws/pcs/gpu-healthcheck`. **That object must exist in your templates bucket** —
+  package the suite (`gpu-healthcheck.sh`, `checks/`, `lib/`, `slurm/`, `instance-profiles.conf`)
+  and upload it alongside the templates (see [DEPLOY-TESTING.md](./DEPLOY-TESTING.md)).
+- deploy-all threads `GpuHealthCheck` to the cluster stack and the GPU CNG stacks.
+
+**Default is `none`** (opt-in), so existing deploys are unchanged. Prolog output goes to the
+node's syslog/slurmd log under the `gpu-healthcheck-prolog` tag (not the job's stdout).
+Verify with `scontrol show config | grep -i prolog` after enabling.

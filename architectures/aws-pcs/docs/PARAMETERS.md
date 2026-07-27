@@ -39,12 +39,22 @@ it directly.
 | `SSHAccessCidr` | *(empty)* | When set to a CIDR, opens SSH/22 on the login node to that CIDR via a login-only security group (attached to the login node only, never compute). Empty (default) = SSH over SSM only. Set to your office/VPN range for direct `ssh`/`scp`/VS Code Remote (common for multi-user clusters) |
 | `ManagedAccounting` | `disabled` | Enable Slurm managed accounting (requires Slurm 24.11+) |
 | `AccountingPolicyEnforcement` | `none` | Slurm accounting policy enforcement (`none` or `associations,limits,safe`) |
+| `GpuHealthCheck` | `none` | `prolog` wires the repo's [GPU health-check suite](../../../4.validation_and_observability/2.gpu-cluster-healthcheck) in as a cluster-wide Slurm **Prolog**: before each job it runs fast checks (nvidia-smi + EFA enumeration, ~8s) and **drains the node + requeues the job** if a GPU/EFA fault is detected. The prolog is GPU-aware (no-ops on CPU/login nodes), so it is safe on mixed clusters. The suite is installed to `/opt/aws/pcs/gpu-healthcheck` on the GPU compute node group at first boot (from `s3://<bucket>/<prefix>gpu-healthcheck/gpu-healthcheck.tar.gz`, so that object must be present in your templates bucket). PCS supports `Prolog` only at the cluster level, hence the GPU-aware self-scoping rather than a per-node-group setting. See [OPERATIONS.md §GPU health-check prolog](./OPERATIONS.md). |
 
 ## 3. On-Demand Compute Node Group (CPU)
 
+> **Node-group cap.** AWS PCS limits a cluster to **10 compute node groups** and **10
+> queues**, both **non-adjustable** internal quotas
+> ([PCS quotas](https://docs.aws.amazon.com/pcs/latest/userguide/service-endpoints-quotas.html)).
+> The login node group always uses one slot, so at most **9** GPU/CPU node groups can
+> coexist. The default set is **login + 9 GPU queues** (see §4b–4e), which reaches the cap —
+> so `DeployOnDemandCNG` (this CPU queue) defaults **`false`**. Enable it only if you also
+> disable a GPU queue to keep the total ≤ 10; a template `Rule` fails the stack fast if the
+> full default GPU set is combined with the CPU queue.
+
 | Parameter | Default | Purpose |
 |---|---|---|
-| `DeployOnDemandCNG` | `true` | Deploy the CPU queue |
+| `DeployOnDemandCNG` | `false` | Deploy the CPU queue. Off by default because login + the 9 default GPU queues already reach the 10-node-group PCS cap — enable only if you disable a GPU queue |
 | `OnDemandInstanceType` | `c6i.4xlarge` | CPU queue instance type |
 | `OnDemandMinCount` | `0` | CPU queue minimum nodes (0 = dynamic scaling) |
 | `OnDemandMaxCount` | `4` | CPU queue maximum nodes |
@@ -78,6 +88,85 @@ See [GPU compute](../README.md#gpu-compute-p5p6) for instance/EFA/capacity guida
 > | `PurchaseOption` | `ONDEMAND` | `ONDEMAND` / `SPOT` / `CAPACITY_BLOCK`. Single source of truth for the node group's purchasing mode |
 > | `SpotAllocationStrategy` | `price-capacity-optimized` | EC2 Spot allocation strategy when `PurchaseOption=SPOT` (`lowest-price` / `capacity-optimized` / `price-capacity-optimized`). Ignored otherwise |
 > | `UsePlacementGroup` | `true` | Whether On-Demand nodes launch into an auto-created cluster placement group. Set `false` to relax placement and avoid `InsufficientInstanceCapacity` for scarce GPU types. No effect on Spot / Capacity Block (which never use one) |
+
+## 4b–4e. GPU Queues — g7 / g7e / g6e (per-AZ, On-Demand)
+
+Ten independent, separately-toggleable **On-Demand** GPU queues across three families,
+each placed in the AZ where that family has the best capacity. Every queue is single-AZ
+(the multi-NIC EFA launch templates pin the subnet per network interface, so a queue
+cannot span AZs while keeping EFA); to run a family in more than one AZ, deploy its
+per-AZ queues. `full` = 48xlarge, `half` = 24xlarge. `MinCount` stays `0`, so a queue costs
+nothing until a job is submitted to its partition. These are independent of the P5/P6 queue
+above.
+
+> **PCS 10-node-group cap → 9 GPU queues on by default.** AWS PCS limits a cluster to **10
+> compute node groups** and **10 queues** (both non-adjustable). The login node group always
+> uses one slot, so all ten GPU queues **cannot** coexist with it. Therefore **nine** GPU
+> queues default `true` and **`DeployG7Half` defaults `false`** (g7-full still covers the g7
+> family in the primary AZ), giving login + 9 GPU = exactly 10 node groups. The CPU queue
+> (`DeployOnDemandCNG`, §3) also defaults `false` for the same reason. To enable a
+> tenth-plus queue (g7-half or CPU), **disable another queue first** to stay ≤ 10 — a
+> template `Rule` fails the stack fast if the full default GPU set is combined with either.
+
+**AZ placement.** The `-az2` / `-az3` queues launch into `AdditionalSubnetAZ2` /
+`AdditionalSubnetAZ3` (section 1) and **require that subnet to be set** — if the AZ isn't
+provided, the queue self-skips (its `Deploy*` default has no effect) instead of
+failing the stack. Set `AdditionalSubnetAZ2` / `AdditionalSubnetAZ3` to the AZs where the
+family has capacity (e.g. in `us-east-2`: g7 in most AZs, g7e in `az1`/`az2`, g6e in
+`az2`/`az3`). See the [g7/g7e/g6e deploy guide](./G7E-DEPLOY.md).
+
+Each family/size maps to a dedicated multi-NIC EFA template: g7 full = `add-cng-g7.yaml`
+(2 NIC), g7 half = `add-cng-g7-24xl.yaml` (1 NIC), g7e full = `add-cng-g7e.yaml` (4 NIC),
+g7e half = `add-cng-g7e-24xl.yaml` (2 NIC), g6e full = `add-cng-g6e.yaml` (4 NIC), g6e
+half = `add-cng-g6e-24xl.yaml` (2 NIC).
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `DeployG7Full` | `true` | Deploy the g7.48xlarge (8× RTX PRO 4500, 2-NIC EFA) queue in the primary AZ |
+| `G7FullName` | `gpu-g7-full` | g7 full node-group + Slurm queue name |
+| `G7FullMinCount` | `0` | g7 full minimum nodes (0 = dynamic scaling) |
+| `G7FullMaxCount` | `2` | g7 full maximum nodes |
+| `DeployG7Half` | `false` | Deploy the g7.24xlarge (4-GPU, 1-NIC EFA) queue in the primary AZ. **Off by default** to stay within the 10-node-group cap (login + 9 other GPU queues); enable only if you disable another queue |
+| `G7HalfName` | `gpu-g7-half` | g7 half node-group + Slurm queue name |
+| `G7HalfMinCount` | `0` | g7 half minimum nodes (0 = dynamic scaling) |
+| `G7HalfMaxCount` | `2` | g7 half maximum nodes |
+| `DeployG7eFull` | `true` | Deploy the g7e.48xlarge (8× RTX PRO 6000, 4-NIC EFA) queue in the primary AZ |
+| `G7eFullName` | `gpu-g7e-full` | g7e full node-group + Slurm queue name |
+| `G7eFullMinCount` | `0` | g7e full minimum nodes (0 = dynamic scaling) |
+| `G7eFullMaxCount` | `2` | g7e full maximum nodes |
+| `DeployG7eHalf` | `true` | Deploy the g7e.24xlarge (4-GPU, 2-NIC EFA) queue in the primary AZ |
+| `G7eHalfName` | `gpu-g7e-half` | g7e half node-group + Slurm queue name |
+| `G7eHalfMinCount` | `0` | g7e half minimum nodes (0 = dynamic scaling) |
+| `G7eHalfMaxCount` | `2` | g7e half maximum nodes |
+| `DeployG7eFullAz2` | `true` | Deploy a g7e.48xlarge queue in AZ2. **Requires `AdditionalSubnetAZ2`** (self-skips otherwise) |
+| `G7eFullAz2Name` | `gpu-g7e-full-az2` | g7e full (AZ2) node-group + Slurm queue name |
+| `G7eFullAz2MinCount` | `0` | g7e full (AZ2) minimum nodes (0 = dynamic scaling) |
+| `G7eFullAz2MaxCount` | `2` | g7e full (AZ2) maximum nodes |
+| `DeployG7eHalfAz2` | `true` | Deploy a g7e.24xlarge queue in AZ2. **Requires `AdditionalSubnetAZ2`** (self-skips otherwise) |
+| `G7eHalfAz2Name` | `gpu-g7e-half-az2` | g7e half (AZ2) node-group + Slurm queue name |
+| `G7eHalfAz2MinCount` | `0` | g7e half (AZ2) minimum nodes (0 = dynamic scaling) |
+| `G7eHalfAz2MaxCount` | `2` | g7e half (AZ2) maximum nodes |
+| `DeployG6eFullAz2` | `true` | Deploy a g6e.48xlarge (8× L40S, 4-NIC EFA) queue in AZ2. **Requires `AdditionalSubnetAZ2`** (self-skips otherwise) |
+| `G6eFullAz2Name` | `gpu-g6e-full-az2` | g6e full (AZ2) node-group + Slurm queue name |
+| `G6eFullAz2MinCount` | `0` | g6e full (AZ2) minimum nodes (0 = dynamic scaling) |
+| `G6eFullAz2MaxCount` | `2` | g6e full (AZ2) maximum nodes |
+| `DeployG6eHalfAz2` | `true` | Deploy a g6e.24xlarge (4-GPU, 2-NIC EFA) queue in AZ2. **Requires `AdditionalSubnetAZ2`** (self-skips otherwise) |
+| `G6eHalfAz2Name` | `gpu-g6e-half-az2` | g6e half (AZ2) node-group + Slurm queue name |
+| `G6eHalfAz2MinCount` | `0` | g6e half (AZ2) minimum nodes (0 = dynamic scaling) |
+| `G6eHalfAz2MaxCount` | `2` | g6e half (AZ2) maximum nodes |
+| `DeployG6eFullAz3` | `true` | Deploy a g6e.48xlarge queue in AZ3. **Requires `AdditionalSubnetAZ3`** (self-skips otherwise) |
+| `G6eFullAz3Name` | `gpu-g6e-full-az3` | g6e full (AZ3) node-group + Slurm queue name |
+| `G6eFullAz3MinCount` | `0` | g6e full (AZ3) minimum nodes (0 = dynamic scaling) |
+| `G6eFullAz3MaxCount` | `2` | g6e full (AZ3) maximum nodes |
+| `DeployG6eHalfAz3` | `true` | Deploy a g6e.24xlarge queue in AZ3. **Requires `AdditionalSubnetAZ3`** (self-skips otherwise) |
+| `G6eHalfAz3Name` | `gpu-g6e-half-az3` | g6e half (AZ3) node-group + Slurm queue name |
+| `G6eHalfAz3MinCount` | `0` | g6e half (AZ3) minimum nodes (0 = dynamic scaling) |
+| `G6eHalfAz3MaxCount` | `2` | g6e half (AZ3) maximum nodes |
+| `GpuUsePlacementGroup` | `true` | Shared across **all** g7/g7e/g6e queues. Launch On-Demand GPU nodes into a cluster placement group (`true`, lowest inter-node latency for tightly-coupled multi-node jobs). Set `false` to relax placement — a cluster placement group forces all nodes into one tight physical group, which can cause `InsufficientInstanceCapacity` for scarce GPU types even when the AZ has capacity; relaxing it improves On-Demand launch success (best for single-node jobs or when you hit ICE) |
+
+> **Note — g7/g7e/g6e and Capacity Blocks.** These families are **not** eligible for
+> Capacity Blocks for ML (those cover the P/Trn training families only), so the queues are
+> On-Demand only — `CapacityReservationId` (section 4) does not apply to them.
 
 ## 5. Additional Cluster Configuration (Monitoring, Multi-User, Container Runtime)
 

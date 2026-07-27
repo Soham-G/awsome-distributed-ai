@@ -258,6 +258,21 @@ Parameters:
     Description: Space-separated arguments passed to the post-install script.
     Default: ''
 
+  GpuHealthCheck:
+    Type: String
+    Description: >-
+      Install the GPU health-check suite on this node group for the Slurm health-check
+      prolog. 'prolog' fetches the suite from
+      s3://<bucket>/<prefix>gpu-healthcheck/gpu-healthcheck.tar.gz into
+      /opt/aws/pcs/gpu-healthcheck at first boot, where the cluster-wide Prolog
+      (set by cluster.yaml's matching GpuHealthCheck=prolog) invokes it. Set this on
+      GPU compute node groups; the prolog itself is GPU-aware and no-ops on non-GPU
+      nodes. 'none' (default) skips install.
+    Default: 'none'
+    AllowedValues:
+      - 'none'
+      - 'prolog'
+
   SlurmVersion:
     Type: String
     Description: >-
@@ -472,6 +487,23 @@ Resources:
                 echo "Post-install script completed (exit $?)" | tee -a /var/log/pcs-post-install.log
               else
                 echo "No post-install script configured (PostInstallScriptUrl empty)" | tee /var/log/pcs-post-install.log
+              fi
+            # GPU health-check suite (optional). When GpuHealthCheck != none, fetch the
+            # suite tarball from the templates bucket and extract to a FIXED path that the
+            # cluster-wide Slurm Prolog (set in cluster.yaml) references.
+            - |
+              if [ "${GpuHealthCheck}" != "none" ]; then
+                echo "Installing GPU health-check suite..." | tee /var/log/pcs-gpu-healthcheck-install.log
+                mkdir -p /opt/aws/pcs/gpu-healthcheck
+                if aws s3 cp "s3://${S3BucketName}/${S3KeyPrefix}gpu-healthcheck/gpu-healthcheck.tar.gz" /tmp/gpu-healthcheck.tar.gz >> /var/log/pcs-gpu-healthcheck-install.log 2>&1; then
+                  tar -xzf /tmp/gpu-healthcheck.tar.gz -C /opt/aws/pcs/gpu-healthcheck --strip-components=1 >> /var/log/pcs-gpu-healthcheck-install.log 2>&1
+                  chmod +x /opt/aws/pcs/gpu-healthcheck/gpu-healthcheck.sh \
+                           /opt/aws/pcs/gpu-healthcheck/checks/*.sh \
+                           /opt/aws/pcs/gpu-healthcheck/slurm/*.sh 2>> /var/log/pcs-gpu-healthcheck-install.log
+                  echo "GPU health-check suite installed to /opt/aws/pcs/gpu-healthcheck (exit $?)" | tee -a /var/log/pcs-gpu-healthcheck-install.log
+                else
+                  echo "WARNING: failed to fetch gpu-healthcheck.tar.gz; prolog will be missing on this node" | tee -a /var/log/pcs-gpu-healthcheck-install.log
+                fi
               fi
             # FSx Home directories mount
             - mkdir -p /tmp/home
