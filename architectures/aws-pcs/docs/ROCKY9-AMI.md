@@ -1,0 +1,202 @@
+# Building and using a PCS-Ready Rocky Linux 9 GPU AMI
+
+By default every node group in this reference architecture boots the AWS-published
+**PCS-Ready Ubuntu 24.04 DLAMI** (PCS agent, Slurm, NVIDIA/CUDA, and EFA pre-baked). To run
+the G-series GPU queues on **Rocky Linux 9** instead, build a PCS-Ready Rocky 9 GPU AMI with
+[`pcs-ready-rocky9-gpu.yaml`](../assets/pcs-ready-rocky9-gpu.yaml) and pass its `ami-xxx` as
+`AmiId`. Rocky Linux 9 is an
+[officially supported AWS PCS operating system](https://docs.aws.amazon.com/pcs/latest/userguide/operating-systems.html).
+
+Unlike the Ubuntu DLAMI path (see [CUSTOM-AMI.md](./CUSTOM-AMI.md), which only *layers*
+Enroot/Pyxis onto an already-PCS-Ready base), there is **no AWS-published PCS-Ready Rocky
+base**. This template builds the whole stack from a stock Rocky 9 cloud image using AWS's own
+installers, in this order (EC2 Image Builder reboots between kmod layers):
+
+1. **Kernel update + toolchain** — `dnf -y update`, EPEL, Development Tools, matching
+   `kernel-devel`; reboot.
+2. **NVIDIA driver + CUDA + container toolkit** — from NVIDIA's rhel9 CUDA dnf repo.
+3. **EFA** — the `aws-efa-installer` (GPG-verified).
+4. **AWS PCS agent** — the AWS agent installer (GPG-verified). *Required* for the node to
+   register with PCS.
+5. **Slurm** — the AWS Slurm installer (GPG-verified), version-locked to `SlurmVersion`.
+   Installs to `/opt/aws/pcs/scheduler/slurm-<ver>` — the exact layout the rest of the repo
+   keys on.
+6. **Enroot + Pyxis** — Enroot `.rpm`, `libnvidia-container` yum repo, Pyxis compiled against
+   this Slurm version.
+7. **DCGM** — for the monitoring stack.
+8. **FSx Lustre client** — el9 kmod for `/fsx`.
+9. **SELinux** — set the workload booleans and bake the chosen mode.
+
+## Prerequisites
+
+- **A kernel-updated Rocky 9 base AMI.** Start from an official Rocky Linux 9 cloud AMI
+  ([rockylinux.org/cloud-images](https://rockylinux.org/cloud-images/)), launch it, run
+  `sudo dnf -y update`, reboot, and create an image — then use *that* AMI as `BaseAmiId`.
+  AWS warns that PCS custom-AMI builds can fail if the base kernel is stale (the driver/EFA/
+  Lustre kmods must match the running kernel). The build also runs `dnf -y update` as a
+  safety net, but starting kernel-current avoids most kmod-vs-kernel failures.
+- Permissions to create EC2 Image Builder, IAM, and EC2 resources.
+- Build-instance egress on 443 to: the regional `aws-pcs-repo` bucket, `efa-installer.amazonaws.com`,
+  NVIDIA's `developer.download.nvidia.com` + `nvidia.github.io`, the FSx Lustre client repo,
+  GitHub, and the Rocky/EPEL mirrors.
+
+## Step 1: Build the AMI (~45–60 min one-time, separate stack)
+
+```bash
+REGION=us-east-2
+BASE_AMI=ami-xxxxxxxxxxxxxxxxx   # your kernel-updated Rocky 9 AMI
+
+aws cloudformation create-stack \
+  --stack-name pcs-rocky9 \
+  --template-url https://<your-bucket>.s3.amazonaws.com/templates/pcs-ready-rocky9-gpu.yaml \
+  --parameters \
+    ParameterKey=BaseAmiId,ParameterValue=${BASE_AMI} \
+    ParameterKey=SlurmVersion,ParameterValue=25.11 \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --region ${REGION}
+```
+
+Like the DLAMI template, the AMI is **single-Slurm-version by design** (Pyxis' SPANK ABI is
+locked to its compile-time Slurm) — pass the same `SlurmVersion` you'll use on the cluster.
+Pin `PcsAgentVersion` / `SlurmInstallerVersion` / `NvidiaDriverBranch` / `EfaInstallerVersion`
+explicitly for reproducible builds; verify the agent/Slurm checksums against the
+[AWS PCS software installers](https://docs.aws.amazon.com/pcs/latest/userguide/working-with_ami_installers.html)
+page.
+
+> **SELinux.** Rocky 9 ships SELinux **enforcing**. The template's `SELinuxMode` parameter
+> defaults to **`permissive`** so the AMI works reliably out of the gate (would-be denials
+> are logged as AVCs, not enforced) — the PCS workload spans NFS `/home`, Lustre `/fsx`,
+> Enroot/containers, and slurmd, and getting every context right under enforcing takes
+> iteration. To harden later, launch a node, exercise the workload, review
+> `ausearch -m avc`, add the needed policy, then rebuild with `SELinuxMode=enforcing`.
+
+## Step 2: Read the resulting AMI ID
+
+```bash
+AMI_ID=$(aws cloudformation describe-stacks \
+  --stack-name pcs-rocky9 --region ${REGION} \
+  --query 'Stacks[0].Outputs[?OutputKey==`Rocky9PCSAmiId`].OutputValue' \
+  --output text)
+echo "$AMI_ID"
+```
+
+## Step 3: Pass it to the cluster as `AmiId`
+
+Enroot/Pyxis is baked in, so skip the boot-time install with a single space (as with the
+DLAMI path). The boot scripts (`install-enroot-pyxis.sh`, `setup-directory.sh`) auto-detect
+Rocky vs Ubuntu, so leaving `PostInstallScriptUrl` at its default is also safe (idempotent
+no-op on a pre-baked AMI).
+
+```bash
+aws cloudformation create-stack \
+  --stack-name pcs-gpu \
+  --template-url https://<your-bucket>.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml \
+  --parameters \
+    ParameterKey=PrimarySubnetAZ,ParameterValue=us-east-2a \
+    ParameterKey=AmiId,ParameterValue=$AMI_ID \
+    ParameterKey=SlurmVersion,ParameterValue=25.11 \
+    ParameterKey=PostInstallScriptUrl,ParameterValue=' ' \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --region ${REGION}
+```
+
+Match `SlurmVersion` to what the AMI was built for (the Pyxis ABI lock).
+
+## Deploy a full Rocky 9 cluster (verified end-to-end)
+
+The AMI is a drop-in for the standard cluster template — pass it as `AmiId`. This was
+validated on a live deploy (us-east-2, Rocky 9.8): all node groups came up **ACTIVE** and
+the login node registered with SSM. The boot scripts auto-detect Rocky vs Ubuntu, so the
+same `pcs-ml-cluster-deploy-all.yaml` works unchanged.
+
+```bash
+REGION=us-east-2
+BUCKET=<your-templates-bucket>
+# AZs by stable ID (portable across accounts) -> names the template needs:
+az() { aws ec2 describe-availability-zones --region "$REGION" \
+  --filters "Name=zone-id,Values=$1" --query 'AvailabilityZones[0].ZoneName' --output text; }
+
+aws cloudformation create-stack \
+  --stack-name pcs-rocky9-cluster \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml" \
+  --parameters \
+    ParameterKey=PrimarySubnetAZ,ParameterValue=$(az use2-az1) \
+    ParameterKey=AdditionalSubnetAZ2,ParameterValue=$(az use2-az2) \
+    ParameterKey=AdditionalSubnetAZ3,ParameterValue=$(az use2-az3) \
+    ParameterKey=S3BucketName,ParameterValue=${BUCKET} \
+    ParameterKey=AmiId,ParameterValue=<Rocky9PCSAmiId> \
+    ParameterKey=SlurmVersion,ParameterValue=25.11 \
+    ParameterKey=PostInstallScriptUrl,ParameterValue=' ' \
+    ParameterKey=GpuUsePlacementGroup,ParameterValue=false \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
+```
+
+**SSM on Rocky is wired up automatically:** the AMI installs the SSM agent, but EC2 Image
+Builder strips it from the output AMI during its cleanup (Image Builder uses SSM to
+orchestrate the build). The CNG UserData therefore **reinstalls-if-missing + enables** the
+agent at first boot (Rocky/RHEL only; no-op on Ubuntu). Confirm the login node is reachable:
+
+```bash
+CID=$(aws pcs list-clusters --region $REGION --query "clusters[?name=='pcs-rocky9-cluster'].id | [0]" --output text)
+# node groups + queues should all be ACTIVE (authoritative registration signal):
+aws pcs list-compute-node-groups --cluster-identifier "$CID" --region $REGION --query 'computeNodeGroups[].{n:name,s:status}' --output table
+LOGIN=$(aws ec2 describe-instances --region $REGION \
+  --filters "Name=tag:pcs-cluster-id,Values=$CID" "Name=tag:Name,Values=PCS-login" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+aws ssm start-session --target "$LOGIN" --region $REGION    # SSM works because the agent self-installs at boot
+```
+
+> On Rocky the interactive user is **`rocky`** (not `ubuntu`). `sudo su - rocky` on the login node.
+
+## Verifying the AMI is PCS-Ready
+
+Launch an instance from the built AMI (or check a booted compute node) and confirm the
+contract the rest of the repo depends on:
+
+```bash
+cat /opt/aws/pcs/version                                  # PCS agent installed
+cat /opt/aws/pcs/scheduler/slurm-25.11/version            # Slurm at the PCS path
+ls  /opt/aws/pcs/scheduler/slurm-25.11/{bin,include,lib/slurm}
+systemctl cat slurmd >/dev/null && echo "slurmd unit present"
+nvidia-smi -L                                             # GPUs (on a GPU instance)
+/opt/amazon/efa/bin/fi_info -p efa                        # EFA fabric
+enroot version && lfs --version                           # container runtime + Lustre client
+```
+
+Then deploy with this `AmiId` and confirm the node groups **register** — go `ACTIVE` in the
+PCS API (`aws pcs list-compute-node-groups ...`), which is the authoritative registration
+signal. (See the DNS-SRV caveat below before relying on `sinfo` from the login node.)
+
+## Caveats and known follow-ups
+
+- **This is a from-scratch build** with many moving version pins (PCS agent, Slurm, NVIDIA,
+  EFA, Lustre client). Expect to iterate on component failures the first time — kmod-vs-kernel
+  and SELinux are the usual culprits.
+- **SELinux** defaults to permissive (see above); tightening to enforcing is a deliberate
+  follow-up.
+- **Slurm install path:** AWS docs show both `/opt/aws/pcs/scheduler/` (singular) and
+  `/opt/aws/pcs/schedulers/` (plural) in places. This repo uses the **singular** path; the
+  Slurm component symlinks plural → singular if the installer used the other form.
+- **GPU job execution** still requires enough On-Demand **G/VT vCPU quota** for the instance
+  type — separate from the AMI/registration path. (Not yet exercised end-to-end; the account
+  used for validation had a 64-vCPU G/VT quota, below the 192 vCPU a single .48xlarge needs.)
+- **SSM agent is stripped by Image Builder.** The build installs `amazon-ssm-agent`, but EC2
+  Image Builder removes it from the output AMI on cleanup (it uses SSM to orchestrate the
+  build). The fix lives in the **CNG UserData**, which reinstalls-if-missing + enables the
+  agent at first boot (Rocky/RHEL only). This is why nodes are SSM-reachable despite the AMI
+  itself shipping without a running agent. **Verified.**
+- **`sinfo` / DNS-SRV controller resolution (known follow-up).** On the Rocky login node,
+  `sinfo` fails with `resolve_ctls_from_dns_srv ... DNS SRV lookup failed` — PCS resolves the
+  Slurm controller/config via DNS SRV, and the Rocky AMI does not yet reproduce the Slurm
+  client config the AWS Ubuntu DLAMI ships for this. **Node-group registration and job
+  scheduling are unaffected** (the controller schedules; `sinfo` is a client view) and
+  registration is confirmed via the PCS API. Wiring up the login-node Slurm client config
+  (so `sinfo`/`squeue` work directly) is an open follow-up.
+- **Interactive user is `rocky`, not `ubuntu`.** Any docs/scripts/UserData that assume the
+  `ubuntu` user need the OS-aware branch (the boot scripts already detect this). Spot-check
+  when adding new boot-time logic.
+- The multi-user directory (`DirectoryService=OpenLDAP-LoginNode`) Rocky path uses
+  `openldap-servers` + `authselect` + SELinux and is more involved than the Ubuntu path;
+  validate it on a live Rocky login node before relying on it in production.
+- **Always bump `SemanticVersion` on every rebuild.** Reusing a version makes EC2 Image
+  Builder reuse the *cached component build*, so template edits silently don't take effect.

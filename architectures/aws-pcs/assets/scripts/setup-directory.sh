@@ -40,6 +40,30 @@ LDAP_DB_DIR="/home/ldap-db"
 
 export DEBIAN_FRONTEND=noninteractive
 
+###############################################################################
+# OS-family detection. Debian/Ubuntu and RHEL/Rocky 9 diverge substantially for
+# the directory service: package names, the slapd config flow (debconf vs
+# slappasswd+olc), the slapd.d path, the openldap service user, SELinux vs
+# AppArmor, and PAM/NSS wiring (authselect on RHEL). Everything below branches
+# on OS_FAMILY. NOTE: the RHEL server-role OpenLDAP flow is more involved and
+# should be validated on a live Rocky 9 login node (see docs/ROCKY9-AMI.md).
+###############################################################################
+OS_ID=$( . /etc/os-release 2>/dev/null; echo "${ID:-}" )
+OS_ID_LIKE=$( . /etc/os-release 2>/dev/null; echo "${ID_LIKE:-}" )
+case "${OS_ID}:${OS_ID_LIKE}" in
+    ubuntu:*|debian:*|*:*debian*) OS_FAMILY=debian ;;
+    rocky:*|rhel:*|centos:*|almalinux:*|*:*rhel*|*:*fedora*) OS_FAMILY=rhel ;;
+    *) echo "[directory] ERROR: unsupported OS (ID=${OS_ID} ID_LIKE=${OS_ID_LIKE})"; exit 1 ;;
+esac
+if [ "${OS_FAMILY}" = "rhel" ]; then
+    OPENLDAP_USER=ldap
+    SLAPD_D_DIR=/etc/openldap/slapd.d
+else
+    OPENLDAP_USER=openldap
+    SLAPD_D_DIR=/etc/ldap/slapd.d
+fi
+echo "[directory] OS family: ${OS_FAMILY} (openldap user: ${OPENLDAP_USER})"
+
 # AWS CLI calls below (ssm put-parameter, ec2 describe-instances) pass no
 # --region: on EC2 the CLI resolves both credentials and region from the
 # instance's IMDS credential provider (it obtains the IMDSv2 token itself, even
@@ -86,6 +110,26 @@ apt_get() {
     return 1
 }
 
+# Refresh package metadata (apt update on Debian; dnf makecache on RHEL).
+pkg_refresh() {
+    if [ "${OS_FAMILY}" = "debian" ]; then
+        apt_get update -qq
+    else
+        dnf -y makecache || true
+    fi
+}
+
+# Install packages for the current OS family. Callers pass the RHEL package list
+# via PKGS_RHEL and the Debian list via PKGS_DEBIAN env before calling, since the
+# names differ (e.g. libpam-sss vs sssd; slapd vs openldap-servers).
+pkg_install() {
+    if [ "${OS_FAMILY}" = "debian" ]; then
+        apt_get install -y ${PKGS_DEBIAN}
+    else
+        dnf -y install ${PKGS_RHEL}
+    fi
+}
+
 ###############################################################################
 # SERVER role — login node: install slapd + configure
 ###############################################################################
@@ -113,11 +157,17 @@ setup_server() {
         fi
     fi
 
-    echo "[directory-server] Running apt-get update..."
-    apt_get update -qq
+    echo "[directory-server] Refreshing package metadata..."
+    pkg_refresh
 
-    echo "[directory-server] Installing slapd + ldap-utils..."
-    debconf-set-selections <<EOF
+    # slapd's systemd unit name differs by distro: 'slapd' on Debian, 'slapd' also
+    # on RHEL openldap-servers (the unit is named slapd there too), so SLAPD_SVC is
+    # 'slapd' in both — but the INSTALL + preseed flow is completely different.
+    SLAPD_SVC=slapd
+
+    if [ "${OS_FAMILY}" = "debian" ]; then
+        echo "[directory-server] Installing slapd + ldap-utils (Debian)..."
+        debconf-set-selections <<EOF
 slapd slapd/internal/adminpw password ${LDAP_ADMIN_PASSWORD}
 slapd slapd/internal/generated_adminpw password ${LDAP_ADMIN_PASSWORD}
 slapd slapd/password2 password ${LDAP_ADMIN_PASSWORD}
@@ -128,10 +178,23 @@ slapd slapd/purge_database boolean false
 slapd slapd/move_old_database boolean false
 slapd slapd/no_configuration boolean false
 EOF
-    apt_get install -y slapd ldap-utils
+        PKGS_DEBIAN="slapd ldap-utils" pkg_install
+    else
+        echo "[directory-server] Installing openldap-servers + clients (RHEL/Rocky)..."
+        # openldap-servers is in the CRB/PowerTools repo on RHEL 9; ensure it's on.
+        dnf -y install epel-release || true
+        dnf config-manager --set-enabled crb 2>/dev/null || dnf config-manager --set-enabled powertools 2>/dev/null || true
+        PKGS_RHEL="openldap-servers openldap-clients" pkg_install
+        # RHEL has no debconf preseed. Configure the MDB suffix + admin DN + rootpw
+        # directly against cn=config after the service is up (below). Seed the config
+        # DB from the shipped template if this is a first install.
+        if [ ! -d "${SLAPD_D_DIR}/cn=config" ] && [ -d /usr/share/openldap-servers ]; then
+            install -d -m 0700 -o "${OPENLDAP_USER}" -g "${OPENLDAP_USER}" "${SLAPD_D_DIR}"
+        fi
+    fi
 
     echo "[directory-server] Configuring LDAP DB on shared storage (${LDAP_DB_DIR})..."
-    systemctl stop slapd || true
+    systemctl stop "${SLAPD_SVC}" || true
 
     # Move DB to shared OpenZFS (/home) if not already there
     if [ ! -d "${LDAP_DB_DIR}" ]; then
@@ -139,29 +202,61 @@ EOF
         if [ -d /var/lib/ldap ] && [ "$(ls -A /var/lib/ldap 2>/dev/null)" ]; then
             cp -a /var/lib/ldap/* "${LDAP_DB_DIR}/"
         fi
-        chown -R openldap:openldap "${LDAP_DB_DIR}"
+        chown -R "${OPENLDAP_USER}:${OPENLDAP_USER}" "${LDAP_DB_DIR}"
     fi
 
-    # Update slapd DB directory in cn=config
-    if [ -d /etc/ldap/slapd.d ]; then
-        MDB_LDIF=$(find /etc/ldap/slapd.d -name "olcDatabase*mdb*" -o -name "olcDatabase*hdb*" | head -1)
+    # Update slapd DB directory in cn=config (slapd.d path differs by distro).
+    if [ -d "${SLAPD_D_DIR}" ]; then
+        MDB_LDIF=$(find "${SLAPD_D_DIR}" -name "olcDatabase*mdb*" -o -name "olcDatabase*hdb*" | head -1)
         if [ -n "$MDB_LDIF" ] && grep -q "olcDbDirectory" "$MDB_LDIF"; then
             sed -i "s|olcDbDirectory:.*|olcDbDirectory: ${LDAP_DB_DIR}|" "$MDB_LDIF"
         fi
     fi
 
-    # AppArmor: allow slapd to access /home/ldap-db
-    if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then
-        if ! grep -q "${LDAP_DB_DIR}" /etc/apparmor.d/usr.sbin.slapd; then
-            sed -i "/\/var\/lib\/ldap\/ r,/a\\  ${LDAP_DB_DIR}/ r," /etc/apparmor.d/usr.sbin.slapd
-            sed -i "/\/var\/lib\/ldap\/\*\* rwk,/a\\  ${LDAP_DB_DIR}/** rwk," /etc/apparmor.d/usr.sbin.slapd
-            apparmor_parser -r /etc/apparmor.d/usr.sbin.slapd 2>/dev/null || true
+    if [ "${OS_FAMILY}" = "debian" ]; then
+        # AppArmor: allow slapd to access /home/ldap-db (Debian confines slapd via AppArmor).
+        if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then
+            if ! grep -q "${LDAP_DB_DIR}" /etc/apparmor.d/usr.sbin.slapd; then
+                sed -i "/\/var\/lib\/ldap\/ r,/a\\  ${LDAP_DB_DIR}/ r," /etc/apparmor.d/usr.sbin.slapd
+                sed -i "/\/var\/lib\/ldap\/\*\* rwk,/a\\  ${LDAP_DB_DIR}/** rwk," /etc/apparmor.d/usr.sbin.slapd
+                apparmor_parser -r /etc/apparmor.d/usr.sbin.slapd 2>/dev/null || true
+            fi
         fi
+    else
+        # RHEL/Rocky: SELinux (not AppArmor) confines slapd. Label the shared DB dir
+        # with the slapd DB type so an enforcing system lets slapd read/write it, and
+        # allow reading home dirs over NFS. Best-effort: no-ops if SELinux is disabled.
+        if command -v semanage >/dev/null 2>&1; then
+            semanage fcontext -a -t slapd_db_t "${LDAP_DB_DIR}(/.*)?" 2>/dev/null || true
+        fi
+        restorecon -Rv "${LDAP_DB_DIR}" 2>/dev/null || true
+        setsebool -P use_nfs_home_dirs 1 2>/dev/null || true
     fi
 
-    chown -R openldap:openldap "${LDAP_DB_DIR}"
-    systemctl start slapd
-    systemctl enable slapd
+    chown -R "${OPENLDAP_USER}:${OPENLDAP_USER}" "${LDAP_DB_DIR}"
+    systemctl start "${SLAPD_SVC}"
+    systemctl enable "${SLAPD_SVC}"
+
+    # RHEL/Rocky: openldap-servers ships with an EMPTY cn=config (no suffix/admin/rootpw
+    # like Debian's debconf sets up). Seed the MDB suffix, admin DN, and rootpw against
+    # cn=config now that slapd is running. Debian already has these from debconf.
+    if [ "${OS_FAMILY}" = "rhel" ]; then
+        local hashed_pw
+        hashed_pw=$(slappasswd -s "${LDAP_ADMIN_PASSWORD}")
+        # Find the MDB database DN in cn=config (usually olcDatabase={2}mdb).
+        ldapmodify -Y EXTERNAL -H ldapi:/// 2>/dev/null <<EOF || echo "[directory-server] NOTE: cn=config seed may need manual review on RHEL (see docs/ROCKY9-AMI.md)"
+dn: olcDatabase={2}mdb,cn=config
+changetype: modify
+replace: olcSuffix
+olcSuffix: ${LDAP_DOMAIN_SUFFIX}
+-
+replace: olcRootDN
+olcRootDN: cn=admin,${LDAP_DOMAIN_SUFFIX}
+-
+replace: olcRootPW
+olcRootPW: ${hashed_pw}
+EOF
+    fi
 
     # Wait for slapd
     for i in $(seq 1 10); do
@@ -201,7 +296,7 @@ EOF
     else
         echo "${LDAP_ADMIN_PASSWORD}" > "${LDAP_DB_DIR}/.admin-password"
         chmod 600 "${LDAP_DB_DIR}/.admin-password"
-        chown openldap:openldap "${LDAP_DB_DIR}/.admin-password"
+        chown "${OPENLDAP_USER}:${OPENLDAP_USER}" "${LDAP_DB_DIR}/.admin-password"
         echo "[directory-server] WARNING: SSM put failed. Password saved to ${LDAP_DB_DIR}/.admin-password"
     fi
 
@@ -291,14 +386,18 @@ setup_client() {
 setup_client_internal() {
     local server_uri="$1"
 
-    echo "[directory-client] Running apt-get update..."
-    apt_get update -qq
+    echo "[directory-client] Refreshing package metadata..."
+    pkg_refresh
 
     echo "[directory-client] Installing SSSD..."
     # sssd-tools provides sss_cache, needed to invalidate the SSSD cache after a
     # user is deleted/modified in LDAP (otherwise the change is not visible until
     # the cache entry's TTL expires — see USER-MANAGEMENT.md "Deleting a user").
-    apt_get install -y sssd sssd-tools libpam-sss libnss-sss ldap-utils
+    # Package names differ: Debian splits pam/nss into libpam-sss/libnss-sss;
+    # RHEL/Rocky bundles them into sssd + sssd-ldap and uses oddjob-mkhomedir.
+    PKGS_DEBIAN="sssd sssd-tools libpam-sss libnss-sss ldap-utils" \
+    PKGS_RHEL="sssd sssd-tools sssd-ldap oddjob-mkhomedir openldap-clients authselect" \
+        pkg_install
 
     echo "[directory-client] Configuring SSSD (server: ${server_uri})..."
     cat > /etc/sssd/sssd.conf <<EOF
@@ -323,15 +422,24 @@ max_id = 60000
 EOF
     chmod 600 /etc/sssd/sssd.conf
 
-    # Enable pam_mkhomedir
-    if ! grep -q pam_mkhomedir /etc/pam.d/common-session; then
-        echo "session optional pam_mkhomedir.so skel=/etc/skel umask=0022" >> /etc/pam.d/common-session
+    if [ "${OS_FAMILY}" = "debian" ]; then
+        # Enable pam_mkhomedir (Debian: edit common-session directly).
+        if ! grep -q pam_mkhomedir /etc/pam.d/common-session; then
+            echo "session optional pam_mkhomedir.so skel=/etc/skel umask=0022" >> /etc/pam.d/common-session
+        fi
+        # Configure NSS to consult sss (Debian: edit nsswitch.conf directly).
+        sed -i 's/^passwd:.*/passwd:         files systemd sss/' /etc/nsswitch.conf
+        sed -i 's/^group:.*/group:          files systemd sss/' /etc/nsswitch.conf
+        sed -i 's/^shadow:.*/shadow:         files sss/' /etc/nsswitch.conf
+    else
+        # RHEL/Rocky: use authselect to wire NSS + PAM for sssd (the supported way;
+        # hand-editing nsswitch.conf/system-auth is overwritten by authselect).
+        # 'with-mkhomedir' enables pam_oddjob_mkhomedir for auto home creation.
+        authselect select sssd with-mkhomedir --force 2>/dev/null || authselect select sssd --force 2>/dev/null || true
+        systemctl enable --now oddjobd 2>/dev/null || true
+        # SELinux: allow login/home over NFS (OpenZFS /home) on the client too.
+        setsebool -P use_nfs_home_dirs 1 2>/dev/null || true
     fi
-
-    # Configure NSS
-    sed -i 's/^passwd:.*/passwd:         files systemd sss/' /etc/nsswitch.conf
-    sed -i 's/^group:.*/group:          files systemd sss/' /etc/nsswitch.conf
-    sed -i 's/^shadow:.*/shadow:         files sss/' /etc/nsswitch.conf
 
     systemctl enable sssd
     systemctl restart sssd

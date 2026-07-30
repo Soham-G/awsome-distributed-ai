@@ -10,18 +10,19 @@
 #      /opt/aws/pcs/scheduler/slurm-${VERSION}/include/. Versions in
 #      SLURM_VERSIONS whose directory is absent are SKIPPED (warning, not error),
 #      leaving no plugstack config for that version. Use a PCS-Ready DLAMI base AMI.
-#   2. Debian/Ubuntu family only: uses apt-get/dpkg (no yum/dnf). Tested on
-#      Ubuntu 24.04 (PCS-Ready DLAMI Base).
+#   2. OS: Debian/Ubuntu (apt/dpkg, .deb) OR RHEL family incl. Rocky/RHEL 9
+#      (dnf/rpm, .rpm), selected automatically from /etc/os-release. Tested on
+#      Ubuntu 24.04 (PCS-Ready DLAMI Base) and Rocky Linux 9 (custom AMI build).
 #   3. Outbound network egress required (private subnets need a NAT path; the S3
 #      VPC endpoint alone is NOT sufficient):
-#        - github.com                 (Enroot .deb releases, Pyxis source)
+#        - github.com                 (Enroot .deb/.rpm releases, Pyxis source)
 #        - raw.githubusercontent.com  (aws-samples enroot.template.conf)
 #        - nvidia.github.io           (libnvidia-container repo, GPU nodes only)
-#        - Ubuntu apt mirrors
+#        - the distro's package mirrors (Ubuntu apt / Rocky+EPEL dnf)
 #   4. Runs as root and may contend with cloud-init / unattended-upgrades for the
-#      apt lock at first boot. The script now waits for the dpkg/apt lock and
+#      apt lock at first boot (Ubuntu). The script waits for the dpkg/apt lock and
 #      retries apt (wait_for_apt_lock/apt_get), so the boot-time lock race no
-#      longer aborts the install.
+#      longer aborts the install. (dnf has no equivalent boot-time lock race.)
 #   5. GPU toolkit (nvidia-container-toolkit) installs ONLY when nvidia-smi
 #      succeeds; CPU-only nodes intentionally skip it.
 #
@@ -41,6 +42,24 @@
 set -exo pipefail
 
 echo "Starting Enroot/Pyxis installation for AWS PCS..."
+
+# Detect the OS family so package-manager-specific steps (deps, enroot pkg,
+# nvidia-container repo, slurmd env file) branch correctly. The Pyxis compile and
+# the /opt/aws/pcs/scheduler/... layout are OS-independent.
+#   OS_FAMILY = "debian" (Ubuntu) | "rhel" (Rocky/RHEL 9)
+OS_ID=$( . /etc/os-release 2>/dev/null; echo "${ID:-}" )
+OS_ID_LIKE=$( . /etc/os-release 2>/dev/null; echo "${ID_LIKE:-}" )
+case "${OS_ID}:${OS_ID_LIKE}" in
+  ubuntu:*|debian:*|*:*debian*) OS_FAMILY=debian ;;
+  rocky:*|rhel:*|centos:*|almalinux:*|*:*rhel*|*:*fedora*) OS_FAMILY=rhel ;;
+  *) echo "ERROR: unsupported OS (ID=${OS_ID} ID_LIKE=${OS_ID_LIKE})"; exit 1 ;;
+esac
+echo "Detected OS family: ${OS_FAMILY} (ID=${OS_ID})"
+# Non-root user differs by distro image (Ubuntu cloud image = ubuntu; Rocky = rocky).
+if [ "${OS_FAMILY}" = "rhel" ]; then NONROOT_USER=rocky; else NONROOT_USER=ubuntu; fi
+# slurmd environment file differs: Debian uses /etc/default/slurmd, RHEL uses
+# /etc/sysconfig/slurmd. Whichever the PCS agent's slurmd unit sources is what matters.
+if [ "${OS_FAMILY}" = "rhel" ]; then SLURMD_ENV_FILE=/etc/sysconfig/slurmd; else SLURMD_ENV_FILE=/etc/default/slurmd; fi
 
 ENROOT_RELEASE=3.5.0
 PYXIS_RELEASE=v0.20.0
@@ -104,25 +123,39 @@ apt_get() {
 
 # Install dependencies
 echo "Installing dependencies..."
-apt_get update
-apt_get install -y jq squashfs-tools parallel fuse-overlayfs pigz squashfuse zstd git build-essential
+if [ "${OS_FAMILY}" = "debian" ]; then
+  apt_get update
+  apt_get install -y jq squashfs-tools parallel fuse-overlayfs pigz squashfuse zstd git build-essential
+else
+  # RHEL/Rocky: EPEL provides some of these; Development Tools replaces build-essential.
+  dnf -y install epel-release || dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm || true
+  dnf -y groupinstall "Development Tools" || dnf -y group install "Development Tools"
+  dnf -y install jq squashfs-tools parallel fuse-overlayfs pigz zstd git gettext squashfuse || \
+    dnf -y install jq squashfs-tools parallel fuse-overlayfs pigz zstd git gettext
+fi
 
 # Install nvidia-container-toolkit if GPU is detected
 if nvidia-smi 2>/dev/null; then
   echo "GPU detected, installing nvidia-container-toolkit..."
-  # gpg must not try to open a controlling terminal: post-install/cloud-init runs
-  # with no tty, and `gpg --dearmor` would otherwise fail with
-  # "gpg: cannot open '/dev/tty'", aborting the whole script under `set -e`.
-  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --batch --no-tty --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-  # Use the version-agnostic 'stable/deb' repo path. The per-distribution paths
-  # (e.g. ubuntu24.04) do not all exist and return an HTML 404 that, without
-  # `curl -f`, would get written verbatim into the apt source list and break
-  # `apt-get update`.
-  curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" | \
-    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-  apt_get update -y
-  apt_get install -y libnvidia-container-tools
+  if [ "${OS_FAMILY}" = "debian" ]; then
+    # gpg must not try to open a controlling terminal: post-install/cloud-init runs
+    # with no tty, and `gpg --dearmor` would otherwise fail with
+    # "gpg: cannot open '/dev/tty'", aborting the whole script under `set -e`.
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --batch --no-tty --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    # Use the version-agnostic 'stable/deb' repo path. The per-distribution paths
+    # (e.g. ubuntu24.04) do not all exist and return an HTML 404 that, without
+    # `curl -f`, would get written verbatim into the apt source list and break
+    # `apt-get update`.
+    curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" | \
+      sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+      tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    apt_get update -y
+    apt_get install -y libnvidia-container-tools
+  else
+    # RHEL/Rocky: use the libnvidia-container yum repo (stable/rpm).
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo -o /etc/yum.repos.d/nvidia-container-toolkit.repo
+    dnf -y install nvidia-container-toolkit || dnf -y install libnvidia-container-tools
+  fi
 fi
 
 # Install Enroot (skip if the target version is already present, e.g. baked into
@@ -131,12 +164,20 @@ if [ "$(enroot version 2>/dev/null)" = "${ENROOT_RELEASE}" ]; then
   echo "Enroot ${ENROOT_RELEASE} already installed, skipping."
 else
   echo "Installing Enroot ${ENROOT_RELEASE}..."
-  arch=$(dpkg --print-architecture)
   mkdir -p /tmp/enroot
   cd /tmp/enroot
-  curl -fSsL -O "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_RELEASE}/enroot_${ENROOT_RELEASE}-1_${arch}.deb"
-  curl -fSsL -O "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_RELEASE}/enroot+caps_${ENROOT_RELEASE}-1_${arch}.deb"
-  apt_get install -y ./*.deb
+  if [ "${OS_FAMILY}" = "debian" ]; then
+    arch=$(dpkg --print-architecture)
+    curl -fSsL -O "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_RELEASE}/enroot_${ENROOT_RELEASE}-1_${arch}.deb"
+    curl -fSsL -O "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_RELEASE}/enroot+caps_${ENROOT_RELEASE}-1_${arch}.deb"
+    apt_get install -y ./*.deb
+  else
+    # RHEL/Rocky: .rpm releases for el9.
+    arch=$(rpm --eval '%{_arch}')
+    curl -fSsL -O "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_RELEASE}/enroot-${ENROOT_RELEASE}-1.el9.${arch}.rpm"
+    curl -fSsL -O "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_RELEASE}/enroot+caps-${ENROOT_RELEASE}-1.el9.${arch}.rpm"
+    dnf -y install ./enroot-*.rpm ./enroot+caps-*.rpm
+  fi
 fi
 
 # Configure Enroot
@@ -226,10 +267,14 @@ else
   SLURM_BIN=$(ls -d /opt/aws/pcs/scheduler/slurm-*/bin 2>/dev/null | sort -rV | head -1)
 fi
 SLURMD_PATH_LINE="PATH=${SLURM_BIN}:/usr/lib/ccache/bin:/usr/local/bin:/usr/bin:/bin"
-# Drop any prior PATH= line this script added (idempotent across re-runs), then append.
-sed -i '\#^PATH=/opt/aws/pcs/scheduler/slurm-#d' /etc/default/slurmd 2>/dev/null || true
-echo "${SLURMD_PATH_LINE}" >> /etc/default/slurmd
-echo "slurmd PATH set to use ${SLURM_BIN}"
+# Write the slurmd env file for this OS family (Debian: /etc/default/slurmd,
+# RHEL/Rocky: /etc/sysconfig/slurmd). Drop any prior PATH= line this script added
+# (idempotent across re-runs), then append. Ensure the parent dir exists on a fresh AMI.
+mkdir -p "$(dirname "${SLURMD_ENV_FILE}")"
+touch "${SLURMD_ENV_FILE}"
+sed -i '\#^PATH=/opt/aws/pcs/scheduler/slurm-#d' "${SLURMD_ENV_FILE}" 2>/dev/null || true
+echo "${SLURMD_PATH_LINE}" >> "${SLURMD_ENV_FILE}"
+echo "slurmd PATH set to use ${SLURM_BIN} (via ${SLURMD_ENV_FILE})"
 
 # Load GPU kernel modules if GPU detected
 if nvidia-smi 2>/dev/null; then

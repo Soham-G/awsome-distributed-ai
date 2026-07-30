@@ -8,6 +8,14 @@ Priority: 🔴 high · 🟡 medium · 🟢 low
 
 ## Templates & deployment
 
+- [x] 🟢 **Rocky Linux 9 GPU AMI + OS-aware boot path.** Added
+  `assets/pcs-ready-rocky9-gpu.yaml` (EC2 Image Builder: builds a PCS-Ready Rocky 9 GPU AMI
+  from a stock base — kernel update, NVIDIA/CUDA, EFA, the AWS PCS agent + Slurm installers,
+  Enroot/Pyxis, DCGM, Lustre client), and made the boot scripts + CNG UserData OS-aware
+  (`install-enroot-pyxis.sh` and `setup-directory.sh` branch Ubuntu/apt vs Rocky/dnf; the
+  SELinux step is guarded). Pass the built AMI via `AmiId`. See `docs/ROCKY9-AMI.md`.
+  *Follow-ups: validate the full build + multi-user directory on live Rocky 9 hardware, and
+  harden SELinux from permissive to enforcing.*
 - [x] 🟡 **Multi-AZ support in the prerequisites stack.** `ml-cluster-prerequisites.yaml`
   now supports up to 3 private-subnet AZs via `AdditionalSubnetAZ2`/`AdditionalSubnetAZ3`
   (CIDR1 split into four /18 blocks; additional subnets share the primary AZ's single

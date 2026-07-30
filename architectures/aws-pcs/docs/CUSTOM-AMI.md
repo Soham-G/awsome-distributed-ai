@@ -9,6 +9,13 @@ This is a separate, standalone path: build the AMI once with
 [`pcs-ready-dlami-with-enroot-pyxis.yaml`](../assets/pcs-ready-dlami-with-enroot-pyxis.yaml),
 then pass the resulting `ami-xxx` as `AmiId` to the cluster.
 
+> **Different OS?** This page covers the **Ubuntu DLAMI** path (layering Enroot/Pyxis onto
+> the AWS PCS-Ready Ubuntu base). To run on **Rocky Linux 9** instead, use
+> [`pcs-ready-rocky9-gpu.yaml`](../assets/pcs-ready-rocky9-gpu.yaml), which builds a
+> PCS-Ready Rocky 9 GPU AMI from a stock Rocky base (NVIDIA/CUDA, EFA, PCS agent, Slurm,
+> Enroot/Pyxis, DCGM, Lustre client). See [ROCKY9-AMI.md](./ROCKY9-AMI.md). The cluster boot
+> scripts auto-detect Ubuntu vs Rocky/RHEL, so either AMI works as `AmiId`.
+
 ## Step 1: Build the AMI (~30 min one-time, separate stack)
 
 [![Launch](../images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ready-dlami-with-enroot-pyxis.yaml&stackName=pcs-dlami)

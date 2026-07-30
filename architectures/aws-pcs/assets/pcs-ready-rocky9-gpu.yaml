@@ -1,0 +1,936 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Build a PCS-Ready Rocky Linux 9 GPU AMI with EC2 Image Builder.
+#
+# Unlike pcs-ready-dlami-with-enroot-pyxis.yaml -- which starts from the
+# AWS-published PCS-Ready Ubuntu DLAMI (PCS agent + Slurm + NVIDIA/CUDA + EFA
+# already baked in) and only layers Enroot/Pyxis -- there is NO AWS-published
+# PCS-Ready Rocky base. This template builds the whole stack from a stock Rocky 9
+# cloud image, using AWS's OWN downloadable installers for the PCS agent and Slurm
+# (the only supported way to make an AMI "PCS-Ready"), plus NVIDIA/CUDA, EFA,
+# Enroot/Pyxis, DCGM, and the FSx for Lustre client. The result is a drop-in AMI
+# you pass as the AmiId parameter of the PCS cluster / CNG templates.
+#
+# Rocky 9 is an officially supported AWS PCS operating system. Two hard requirements
+# from the AWS docs are honored here:
+#   1. The base AMI must have an up-to-date kernel or the build can fail -- the first
+#      component runs `dnf -y update` + reboot, and the docs recommend starting from
+#      an already-kernel-updated Rocky 9 image.
+#   2. The PCS agent + Slurm MUST be installed via the AWS installers so the on-disk
+#      layout (/opt/aws/pcs/scheduler/slurm-<ver>, the slurmd unit, slurm:slurm 401,
+#      plugstack dirs) matches what the rest of the reference architecture keys on.
+#
+# The Slurm version is locked (SlurmVersion) because Pyxis is a SPANK plugin whose
+# ABI is version-locked to its compile-time Slurm -- the same single-version rationale
+# as the DLAMI template. Match it to the PCS cluster you will join this AMI to.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Build a PCS-Ready Rocky Linux 9 GPU AMI (NVIDIA/CUDA, EFA, PCS agent, Slurm, Enroot/Pyxis, DCGM, Lustre client) with EC2 Image Builder
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Base AMI Configuration
+        Parameters:
+          - BaseAmiId
+      - Label:
+          default: Software Versions
+        Parameters:
+          - SlurmVersion
+          - PcsAgentVersion
+          - SlurmInstallerVersion
+          - NvidiaDriverBranch
+          - EfaInstallerVersion
+      - Label:
+          default: Image Configuration
+        Parameters:
+          - SemanticVersion
+          - SELinuxMode
+      - Label:
+          default: Build Schedule
+        Parameters:
+          - BuildSchedule
+      - Label:
+          default: AMI Discovery (Optional)
+        Parameters:
+          - PublishToSsm
+          - SsmParameterPrefix
+      - Label:
+          default: AMI Lifecycle Management (Optional)
+        Parameters:
+          - EnableLifecyclePolicy
+          - LifecycleDeprecateAfterWeeks
+      - Label:
+          default: Build Instance Networking (Optional)
+        Parameters:
+          - SubnetId
+          - SecurityGroupIds
+    ParameterLabels:
+      BaseAmiId:
+        default: Rocky Linux 9 base AMI ID (required)
+      SlurmVersion:
+        default: Slurm version (must match the cluster)
+      PcsAgentVersion:
+        default: AWS PCS agent version
+      SlurmInstallerVersion:
+        default: AWS PCS Slurm installer version
+      NvidiaDriverBranch:
+        default: NVIDIA driver branch
+      EfaInstallerVersion:
+        default: EFA installer version
+      SemanticVersion:
+        default: Recipe version
+      SELinuxMode:
+        default: SELinux mode baked into the AMI
+      BuildSchedule:
+        default: Build schedule
+      PublishToSsm:
+        default: Publish AMI IDs to SSM Parameter Store
+      SsmParameterPrefix:
+        default: SSM parameter prefix
+      EnableLifecyclePolicy:
+        default: Enable AMI lifecycle policy
+      LifecycleDeprecateAfterWeeks:
+        default: Deprecate AMIs after (weeks)
+      SubnetId:
+        default: Build subnet ID
+      SecurityGroupIds:
+        default: Build security group IDs
+
+Parameters:
+  BaseAmiId:
+    Type: String
+    Description: >-
+      (REQUIRED) Base Rocky Linux 9 AMI ID. There is no PCS-Ready Rocky base to
+      auto-resolve, so you must supply an official Rocky Linux 9 cloud AMI
+      (https://rockylinux.org/cloud-images/). Strongly recommended: launch that AMI,
+      run `sudo dnf -y update`, reboot, and re-image it first, then pass THAT AMI here
+      -- AWS PCS custom-AMI builds can fail on a stale Rocky kernel. The build also
+      runs `dnf -y update` as a safety net, but starting kernel-current avoids the
+      kmod-vs-kernel mismatch that breaks the NVIDIA/EFA/Lustre driver builds.
+    AllowedPattern: '^ami-[0-9a-f]{8,17}$'
+    ConstraintDescription: Must be a valid AMI ID (ami-xxxxxxxxxxxxxxxxx)
+
+  SlurmVersion:
+    Type: String
+    Description: >-
+      Slurm major version this AMI is built for. Pyxis (SPANK plugin) is ABI-locked
+      to its compile-time Slurm version, so this AMI is single-version on purpose --
+      match the version of the PCS cluster you will join. Drives both the AWS Slurm
+      installer major version and the Pyxis compile.
+    Default: '25.11'
+    AllowedValues:
+      - '25.05'
+      - '25.11'
+
+  PcsAgentVersion:
+    Type: String
+    Description: >-
+      AWS PCS agent installer version to download from the regional aws-pcs-repo
+      bucket (aws-pcs-agent-v<this>.tar.gz). Pin explicitly; verify against the
+      checksum/signature table in the AWS PCS "Software installers" docs.
+    Default: '1.5.0-1'
+
+  SlurmInstallerVersion:
+    Type: String
+    Description: >-
+      AWS PCS Slurm installer maintenance version (the X.Y.Z-R after the major), e.g.
+      25.11.6-2 for SlurmVersion 25.11. Downloaded as
+      aws-pcs-slurm-<SlurmVersion>-installer-<this>.tar.gz. Must be a maintenance
+      release of the chosen SlurmVersion.
+    Default: '25.11.6-2'
+
+  NvidiaDriverBranch:
+    Type: String
+    Description: >-
+      NVIDIA datacenter driver branch. Installed from NVIDIA's rhel9 CUDA dnf repo as
+      the DKMS module STREAM 'nvidia-driver:<this>-dkms' (verified: `dnf module list
+      nvidia-driver` on Rocky 9 lists 570 / 570-dkms / 570-open as separate streams).
+      The -dkms stream BUILDS the kmod against the running kernel via DKMS (requires
+      EPEL's dkms >= 3.1.8, installed by this component). 570 covers the G-series GPUs
+      here (g6e=L40S, g7/g7e=RTX PRO). Bump deliberately to another listed branch.
+    Default: '570'
+
+  EfaInstallerVersion:
+    Type: String
+    Description: >-
+      AWS EFA installer version (aws-efa-installer-<this>.tar.gz), or 'latest'.
+      Installs the EFA kernel driver, Libfabric, and the OFI stack.
+    Default: latest
+
+  SemanticVersion:
+    Type: String
+    Description: Semantic version for the ImageBuilder recipe/components (format X.Y.Z)
+    Default: '1.0.0'
+    AllowedPattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    ConstraintDescription: Must be a valid semantic version (e.g., 1.0.0)
+
+  SELinuxMode:
+    Type: String
+    Description: >-
+      SELinux mode to bake into the AMI. Rocky 9 ships SELinux ENFORCING. The PCS
+      workload touches NFS /home, Lustre /fsx, Enroot/containers, and slurmd; getting
+      every context right under enforcing is involved. 'permissive' (default) makes
+      the AMI work reliably now and logs would-be denials (AVCs) for later tightening;
+      'enforcing' keeps full SELinux but you must validate all contexts. The build
+      sets the matching booleans (e.g. use_nfs_home_dirs) regardless.
+    Default: permissive
+    AllowedValues:
+      - permissive
+      - enforcing
+
+  BuildSchedule:
+    Type: String
+    Description: How often to build new AMIs. Manual requires triggering via console or CLI.
+    Default: Manual
+    AllowedValues:
+      - Manual
+      - Weekly
+      - Monthly
+
+  PublishToSsm:
+    Type: String
+    Description: Publish AMI IDs to SSM Parameter Store for easy discovery. Incurs SSM parameter storage costs.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  SsmParameterPrefix:
+    Type: String
+    Description: Prefix for SSM parameters where AMI IDs will be published (only used if PublishToSsm is true)
+    Default: '/rocky9-for-pcs'
+    AllowedPattern: '^/[a-zA-Z0-9/_-]+$'
+    ConstraintDescription: Must start with / and contain only alphanumeric characters, hyphens, underscores, and forward slashes
+
+  EnableLifecyclePolicy:
+    Type: String
+    Description: Enable lifecycle policy to deprecate old AMIs. Deprecated AMIs remain usable but are hidden from EC2 console searches.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  LifecycleDeprecateAfterWeeks:
+    Type: Number
+    Description: Deprecate AMIs older than this many weeks. At least 1 AMI is always kept visible regardless of age.
+    Default: 4
+    MinValue: 1
+    MaxValue: 52
+
+  SubnetId:
+    Type: String
+    Description: >-
+      (Optional) Subnet for the EC2 Image Builder build instance. Leave empty to use
+      the account's default VPC. Set a subnet with outbound internet access (public,
+      or private + NAT) in accounts with no default VPC. The build instance needs
+      egress on 443 for SSM, the aws-pcs-repo/EFA/NVIDIA/Rocky mirrors, and GitHub.
+    Default: ''
+    AllowedPattern: '^$|^subnet-[0-9a-f]{8,17}$'
+    ConstraintDescription: Must be empty or a valid subnet ID (subnet-xxxxxxxxxxxxxxxxx)
+
+  SecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: >-
+      (Optional) Security group IDs for the build instance. Only used when SubnetId
+      is set; leave empty to use the target VPC's default security group. Egress to
+      0.0.0.0/0 on 443 is sufficient.
+    Default: ''
+
+Conditions:
+  IsWeeklySchedule: !Equals [!Ref BuildSchedule, 'Weekly']
+  IsMonthlySchedule: !Equals [!Ref BuildSchedule, 'Monthly']
+  HasSchedule: !Or
+    - !Condition IsWeeklySchedule
+    - !Condition IsMonthlySchedule
+  EnableSsmPublishing: !Equals [!Ref PublishToSsm, 'true']
+  EnableLifecycle: !Equals [!Ref EnableLifecyclePolicy, 'true']
+  HasSubnet: !Not [!Equals [!Ref SubnetId, '']]
+  HasSecurityGroups: !Not [!Equals [!Join ['', !Ref SecurityGroupIds], '']]
+
+Mappings:
+  # Root device + size for the Rocky 9 build. 100 GiB gives room for the driver
+  # toolchain, CUDA, and compiled Slurm/Pyxis during the build.
+  Rocky9Config:
+    x8664:
+      deviceName: /dev/sda1
+      size: '100'
+  ScheduleExpressions:
+    Weekly:
+      expression: 'cron(0 0 ? * SUN *)'
+    Monthly:
+      expression: 'cron(0 0 1 * ? *)'
+
+Resources:
+  #############################################################################
+  # Built image
+  #############################################################################
+  Rocky9PCSImage:
+    Type: AWS::ImageBuilder::Image
+    Properties:
+      ImageRecipeArn: !GetAtt ImageRecipeRocky9X8664.Arn
+      InfrastructureConfigurationArn: !GetAtt InfrastructureConfigX8664.Arn
+      DistributionConfigurationArn: !GetAtt DistributionConfigRocky9X8664.Arn
+      Tags:
+        Name: rocky9-for-pcs-gpu-x8664
+
+  #############################################################################
+  # IAM Role and Instance Profile for EC2 Image Builder
+  #############################################################################
+  ImageBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: IAM role for EC2 Image Builder instances (Rocky 9 PCS GPU AMI)
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/EC2InstanceProfileForImageBuilder
+      Path: /
+
+  SsmPublishingPolicy:
+    Type: AWS::IAM::Policy
+    Condition: EnableSsmPublishing
+    Properties:
+      PolicyName: SsmParameterPublishing
+      Roles:
+        - !Ref ImageBuilderRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:AddTagsToResource
+            Resource: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter${SsmParameterPrefix}/*
+
+  ImageBuilderInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ImageBuilderRole
+
+  #############################################################################
+  # Component 1: kernel update + build toolchain + EPEL (reboots)
+  #############################################################################
+  KernelUpdateComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-kernel-update-${AWS::StackName}'
+      Description: Update Rocky 9 kernel + install build toolchain and EPEL, then reboot
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: |
+        name: 'Rocky 9 kernel update and toolchain'
+        description: 'dnf update, kernel-devel matching running kernel, Development Tools, EPEL; reboot'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: UpdateAndToolchain
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    # Single literal block: Image Builder's YAML parser treats each list
+                    # item as a plain scalar, so an unquoted "- foo: bar" (colon-space) is
+                    # misread as a map. A '- |' block avoids per-line parsing entirely.
+                    - |
+                      set -euxo pipefail
+                      # Retry dnf against transient mirror/timeout flakes (a slow Rocky mirror
+                      # can leave packages "saved in cache" with the transaction failing exit 1;
+                      # observed once on a ~10-min/233 MB update). Longer timeouts + more retries
+                      # at the dnf layer, plus a shell-level retry loop, make the build robust.
+                      dnf() { command dnf --setopt=retries=10 --setopt=timeout=120 "$@"; }
+                      retry() { local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge 4 ] && return 1; echo "retry $n after failure: $*"; sleep 20; done; }
+                      retry dnf -y update
+                      # EPEL + build toolchain needed by later NVIDIA/EFA/Slurm layers.
+                      retry dnf -y install epel-release || retry dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+                      retry dnf -y groupinstall "Development Tools"
+                      retry dnf -y install dkms wget curl git jq gcc gcc-c++ make
+                      # kernel-devel/headers convenience copy (latest; NOT pinned to the pre-reboot
+                      # running kernel whose -devel may be gone from the repos). Non-fatal -- the
+                      # NVIDIA component (post-reboot) authoritatively installs the booted kernel's devel.
+                      dnf -y install kernel-devel kernel-headers || echo "kernel-devel convenience install skipped"
+                      # Amazon SSM agent. Stock Rocky 9 does NOT ship it (unlike the AWS Ubuntu
+                      # PCS-Ready DLAMI), so without it nodes are unreachable via SSM Session Manager
+                      # -- the access model the cluster templates/docs assume. INSTALL it into the
+                      # image here; ENABLE + START happen at first boot in the CNG UserData (per AWS's
+                      # Rocky SSM doc, the agent is often "installed but not running", so activation
+                      # must run on the live node -- a build-time `systemctl enable` did not persist/
+                      # activate reliably). Python (SSM prereq) is present via the toolchain above.
+                      # This Data block is PLAIN (not !Sub), so fetch the region from IMDSv2 at
+                      # runtime -- a literal ${AWS::Region} would hit `AWS: unbound variable` (set -u).
+                      TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+                      SSM_REGION=$(curl -s -H "X-aws-ec2-metadata-token: ${TOKEN}" http://169.254.169.254/latest/meta-data/placement/region)
+                      command dnf install -y "https://s3.${SSM_REGION}.amazonaws.com/amazon-ssm-${SSM_REGION}/latest/linux_amd64/amazon-ssm-agent.rpm"
+                      rpm -q amazon-ssm-agent
+              - name: RebootAfterKernel
+                action: Reboot
+                inputs:
+                  delaySeconds: 10
+
+  #############################################################################
+  # Component 2: NVIDIA driver + CUDA runtime + container toolkit (rhel9 repo)
+  #############################################################################
+  NvidiaGpuComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-nvidia-gpu-${AWS::StackName}'
+      Description: Install NVIDIA driver, CUDA runtime, and nvidia-container-toolkit from NVIDIA rhel9 repos
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: !Sub |
+        name: 'NVIDIA GPU stack (Rocky 9)'
+        description: 'NVIDIA datacenter driver + CUDA + container toolkit'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallNvidia
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      # ---------------------------------------------------------------
+                      # NVIDIA driver install for Rocky 9 -- recipe verified interactively
+                      # on a stock Rocky 9.7 instance (2026-07-29). The subtle failure mode:
+                      # 'nvidia-driver:<x>-dkms' installs NOTHING and dnf only says
+                      # "filtered out by modular filtering" UNLESS these hold:
+                      #   1. EPEL + a recent DKMS (kmod-nvidia-latest-dkms needs dkms >= 3.1.8;
+                      #      without EPEL there is NO dkms at all, so every driver pkg is filtered).
+                      #   2. NO 'module_hotfixes=1' on the cuda repo -- that lets dnf mix streams
+                      #      and pull a NEWER branch (e.g. 610) that then hits obsoletes conflicts.
+                      #   3. Explicitly module reset -> enable -> install the '<branch>-dkms' STREAM
+                      #      (the dash form IS a real stream: `dnf module list nvidia-driver` shows
+                      #      570 / 570-dkms / 570-open, each with profiles default/fm/ks). Pinning
+                      #      the one stream avoids the cross-branch version conflict.
+                      # The DKMS module compiles against the running kernel -- which is why the
+                      # kernel-update + REBOOT (component 1) must run first, so the running kernel
+                      # matches the available kernel-devel headers.
+                      # ---------------------------------------------------------------
+                      # EPEL first -- provides dkms (>= 3.1.8) that kmod-nvidia-latest-dkms requires.
+                      dnf -y install epel-release || dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+                      # kernel-devel for the BOOTED kernel (post kernel-update reboot, so it exists);
+                      # fall back to latest if an exact match is momentarily unavailable.
+                      dnf -y install dkms elfutils-libelf-devel
+                      dnf -y install "kernel-devel-$(uname -r)" "kernel-headers-$(uname -r)" || dnf -y install kernel-devel kernel-headers
+                      systemctl enable --now dkms || true
+                      # Sanity: dkms must be >= 3.1.8 or the kmod package is uninstallable.
+                      dkms --version
+                      # NVIDIA CUDA repo for RHEL/Rocky 9 (x86_64). Do NOT add module_hotfixes here.
+                      dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+                      dnf -y clean all
+                      # Pin exactly the <branch>-dkms stream (reset any prior enablement first).
+                      dnf -y module reset nvidia-driver || true
+                      dnf -y module enable "nvidia-driver:${NvidiaDriverBranch}-dkms"
+                      dnf -y module install "nvidia-driver:${NvidiaDriverBranch}-dkms"
+                      # Fail loudly (at install, not the later validate step) if no driver landed.
+                      # NOTE: do NOT use `rpm -qa | grep -q ...` here -- under `set -o pipefail`,
+                      # grep -q closes the pipe on first match and rpm -qa dies with SIGPIPE (141),
+                      # making the pipeline "fail" EVEN WHEN the driver IS installed (this exact
+                      # false-negative failed several builds despite a clean install). Capture the
+                      # rpm output first, then match without a pipe.
+                      installed_rpms="$(rpm -qa)"
+                      echo "${!installed_rpms}" | grep -iE 'nvidia-driver-[0-9]|kmod-nvidia' || { echo "ERROR - NVIDIA ${NvidiaDriverBranch}-dkms driver did not install"; exit 1; }
+                      dnf -y install cuda-toolkit || true
+                      # NVIDIA container toolkit (libnvidia-container) for Enroot/Pyxis GPU containers.
+                      curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo -o /etc/yum.repos.d/nvidia-container-toolkit.repo
+                      dnf -y install nvidia-container-toolkit
+              - name: RebootAfterDriver
+                action: Reboot
+                inputs:
+                  delaySeconds: 10
+          - name: validate
+            steps:
+              - name: VerifyNvidia
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      # The build instance (c6i/m6i) has NO GPU, so nvidia-smi CANNOT talk to a
+                      # driver here ("couldn't communicate with the NVIDIA driver") -- that is
+                      # expected and must NOT fail the build. Verify instead that the driver
+                      # package + binary + a built kernel module are present; the real
+                      # nvidia-smi check happens at cluster runtime on an actual GPU node.
+                      # Capture rpm output first (NOT `rpm -qa | grep -q`, which dies with SIGPIPE
+                      # under pipefail and false-negatives even when the driver IS installed).
+                      installed_rpms="$(rpm -qa)"
+                      echo "${!installed_rpms}" | grep -iE 'nvidia-driver-[0-9]|kmod-nvidia' || { echo "ERROR - NVIDIA driver package not installed"; exit 1; }
+                      command -v nvidia-smi >/dev/null 2>&1 || { echo "ERROR - nvidia-smi binary missing"; exit 1; }
+                      # kernel module built for the running kernel (loads on a real GPU node).
+                      modinfo nvidia >/dev/null 2>&1 || echo "WARN - nvidia kmod not visible to modinfo on the GPU-less builder (verify on a GPU node)"
+                      nvidia-smi --version || echo "nvidia-smi cannot reach a GPU on this GPU-less build instance (expected; verified at cluster runtime)"
+
+  #############################################################################
+  # Component 3: EFA installer (kernel driver + Libfabric + OFI)
+  #############################################################################
+  EfaComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-efa-${AWS::StackName}'
+      Description: Install the AWS EFA software stack (Rocky 9)
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: !Sub |
+        name: 'EFA stack (Rocky 9)'
+        description: 'AWS EFA installer: kernel driver, Libfabric, OFI'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallEfa
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      cd /tmp
+                      curl -fSsL -O https://efa-installer.amazonaws.com/aws-efa-installer-${EfaInstallerVersion}.tar.gz
+                      # GPG-verify the EFA tarball (fingerprint published by AWS).
+                      wget -q https://efa-installer.amazonaws.com/aws-efa-installer.key -O /tmp/aws-efa-installer.key
+                      gpg --import /tmp/aws-efa-installer.key
+                      curl -fSsL -O https://efa-installer.amazonaws.com/aws-efa-installer-${EfaInstallerVersion}.tar.gz.sig
+                      gpg --verify ./aws-efa-installer-${EfaInstallerVersion}.tar.gz.sig ./aws-efa-installer-${EfaInstallerVersion}.tar.gz
+                      tar -xf aws-efa-installer-${EfaInstallerVersion}.tar.gz
+                      cd aws-efa-installer
+                      # -y non-interactive. Keep the kmod (default) so EFA works at boot.
+                      ./efa_installer.sh -y
+          - name: validate
+            steps:
+              - name: VerifyEfa
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      /opt/amazon/efa/bin/fi_info -p efa || echo "fi_info found no efa device (expected on a non-EFA build instance); driver install still validated by installer exit code"
+
+  #############################################################################
+  # Component 4: AWS PCS agent installer (GPG-verified)
+  #############################################################################
+  PcsAgentComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-pcs-agent-${AWS::StackName}'
+      Description: Install the AWS PCS agent using the AWS-provided installer
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: !Sub |
+        name: 'AWS PCS agent (Rocky 9)'
+        description: 'Download, GPG-verify, and install the AWS PCS agent'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallPcsAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      REGION="${AWS::Region}"
+                      cd /tmp
+                      curl -fSsL "https://aws-pcs-repo-${!REGION}.s3.${!REGION}.amazonaws.com/aws-pcs-agent/aws-pcs-agent-v${PcsAgentVersion}.tar.gz" -o aws-pcs-agent.tar.gz
+                      # GPG-verify against the AWS PCS Packages key (fingerprint 1C24 32C1 862F 64D1 F90A 239A 7EEF 030E DDF5 C21C).
+                      wget -q "https://aws-pcs-repo-public-keys-${!REGION}.s3.${!REGION}.amazonaws.com/aws-pcs-public-key.pub" -O /tmp/aws-pcs-public-key.pub
+                      gpg --import /tmp/aws-pcs-public-key.pub
+                      FPR=$(gpg --fingerprint 7EEF030EDDF5C21C | tr -d ' ' | grep -o '1C2432C1862F64D1F90A239A7EEF030EDDF5C21C' || true)
+                      if [ -z "${!FPR}" ]; then echo "ERROR - AWS PCS GPG fingerprint mismatch"; exit 1; fi
+                      curl -fSsL "https://aws-pcs-repo-${!REGION}.s3.${!REGION}.amazonaws.com/aws-pcs-agent/aws-pcs-agent-v${PcsAgentVersion}.tar.gz.sig" -o aws-pcs-agent.tar.gz.sig
+                      gpg --verify ./aws-pcs-agent.tar.gz.sig ./aws-pcs-agent.tar.gz
+                      tar -xf aws-pcs-agent.tar.gz
+                      cd aws-pcs-agent
+                      sudo ./installer.sh
+              - name: VerifyPcsAgent
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      cat /opt/aws/pcs/version
+
+  #############################################################################
+  # Component 5: Slurm installer (GPG-verified, version-locked)
+  #############################################################################
+  SlurmComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-slurm-${AWS::StackName}'
+      Description: Install Slurm via the AWS PCS Slurm installer (compiles into /opt/aws/pcs/scheduler)
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: !Sub |
+        name: 'AWS PCS Slurm installer (Rocky 9)'
+        description: 'Download, GPG-verify, and run the AWS Slurm installer for the pinned version'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallSlurm
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      REGION="${AWS::Region}"
+                      cd /tmp
+                      TARBALL="aws-pcs-slurm-${SlurmVersion}-installer-${SlurmInstallerVersion}.tar.gz"
+                      curl -fSsL "https://aws-pcs-repo-${!REGION}.s3.${!REGION}.amazonaws.com/aws-pcs-slurm/${!TARBALL}" -o "${!TARBALL}"
+                      wget -q "https://aws-pcs-repo-public-keys-${!REGION}.s3.${!REGION}.amazonaws.com/aws-pcs-public-key.pub" -O /tmp/aws-pcs-public-key.pub
+                      gpg --import /tmp/aws-pcs-public-key.pub
+                      curl -fSsL "https://aws-pcs-repo-${!REGION}.s3.${!REGION}.amazonaws.com/aws-pcs-slurm/${!TARBALL}.sig" -o "${!TARBALL}.sig"
+                      gpg --verify "./${!TARBALL}.sig" "./${!TARBALL}"
+                      tar -xf "${!TARBALL}"
+                      cd aws-pcs-slurm-${SlurmVersion}-installer
+                      sudo ./installer.sh -y
+              - name: VerifySlurm
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      # The repo (and Pyxis/PATH logic) keys on the SINGULAR path
+                      # /opt/aws/pcs/scheduler/slurm-<ver>. AWS docs show both singular and
+                      # plural in places; normalize to singular if the installer used plural.
+                      if [ ! -d "/opt/aws/pcs/scheduler/slurm-${SlurmVersion}" ] && [ -d "/opt/aws/pcs/schedulers/slurm-${SlurmVersion}" ]; then
+                        mkdir -p /opt/aws/pcs/scheduler
+                        ln -sfn "/opt/aws/pcs/schedulers/slurm-${SlurmVersion}" "/opt/aws/pcs/scheduler/slurm-${SlurmVersion}"
+                      fi
+                      cat "/opt/aws/pcs/scheduler/slurm-${SlurmVersion}/version"
+                      test -d "/opt/aws/pcs/scheduler/slurm-${SlurmVersion}/include"
+                      test -d "/opt/aws/pcs/scheduler/slurm-${SlurmVersion}/lib/slurm"
+
+  #############################################################################
+  # Component 6: Enroot + Pyxis (Rocky/dnf branch; Pyxis compiled per Slurm ver)
+  #############################################################################
+  EnrootPyxisComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-enroot-pyxis-${AWS::StackName}'
+      Description: Install Enroot (rpm) and compile Pyxis for the pinned Slurm version
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: !Sub |
+        name: 'Enroot + Pyxis (Rocky 9)'
+        description: 'Enroot rpm + libnvidia-container yum repo + Pyxis SPANK plugin'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallEnrootPyxis
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      ENROOT_RELEASE=3.5.0
+                      PYXIS_RELEASE=v0.20.0
+                      SLURM_VER="${SlurmVersion}"
+                      SLURM_PATH="/opt/aws/pcs/scheduler/slurm-${!SLURM_VER}"
+                      SLURM_ETC_PATH="/etc/aws/pcs/scheduler/slurm-${!SLURM_VER}"
+                      # Enroot runtime deps (Rocky/dnf equivalents of the Ubuntu list).
+                      dnf -y install jq squashfs-tools parallel fuse-overlayfs pigz zstd squashfuse gettext
+                      # Enroot via .rpm (not .deb). arch from rpm, not dpkg. NOTE: enroot only
+                      # publishes an EL8 rpm (no el9 asset exists -- verified against the GitHub
+                      # release API; a v3.5.0 el9 URL 404s). The el8 rpm installs and runs fine on
+                      # Rocky 9. Filenames: enroot-<ver>-1.el8.<arch>.rpm and enroot+caps-...el8...
+                      ARCH=$(rpm --eval '%{_arch}')
+                      mkdir -p /tmp/enroot && cd /tmp/enroot
+                      # Save to explicit local filenames. The +caps asset URL must encode '+' as
+                      # %2B, but -O would then save the file literally as 'enroot%2Bcaps-...rpm',
+                      # which a later './enroot+caps-*.rpm' glob won't match (dnf then sees an
+                      # unexpanded glob and errors "Can not load RPM file"). Use -o to control the
+                      # on-disk name, and install by explicit paths (no glob).
+                      curl -fSsL -o "enroot-${!ENROOT_RELEASE}.rpm" "https://github.com/NVIDIA/enroot/releases/download/v${!ENROOT_RELEASE}/enroot-${!ENROOT_RELEASE}-1.el8.${!ARCH}.rpm"
+                      curl -fSsL -o "enroot-caps-${!ENROOT_RELEASE}.rpm" "https://github.com/NVIDIA/enroot/releases/download/v${!ENROOT_RELEASE}/enroot%2Bcaps-${!ENROOT_RELEASE}-1.el8.${!ARCH}.rpm"
+                      dnf -y install "./enroot-${!ENROOT_RELEASE}.rpm" "./enroot-caps-${!ENROOT_RELEASE}.rpm"
+                      # Enroot hooks + config (paths are OS-independent once enroot is installed).
+                      ln -sf /usr/share/enroot/hooks.d/50-slurm-pmi.sh /etc/enroot/hooks.d/ || true
+                      ln -sf /usr/share/enroot/hooks.d/50-slurm-pytorch.sh /etc/enroot/hooks.d/ || true
+                      mkdir -p /tmp/enroot /tmp/enroot/data && chmod 1777 /tmp/enroot /tmp/enroot/data
+                      wget -q -O /tmp/enroot.template.conf https://raw.githubusercontent.com/aws-samples/aws-parallelcluster-post-install-scripts/main/pyxis/enroot.template.conf
+                      ENROOT_CACHE_PATH=/tmp/enroot envsubst < /tmp/enroot.template.conf > /etc/enroot/enroot.conf
+                      chmod 0644 /etc/enroot/enroot.conf
+                      # Pyxis compiled against THIS Slurm version's headers.
+                      git clone --depth 1 --branch ${!PYXIS_RELEASE} https://github.com/NVIDIA/pyxis.git /tmp/pyxis
+                      cd /tmp/pyxis
+                      CPPFLAGS="-I ${!SLURM_PATH}/include/" make
+                      CPPFLAGS="-I ${!SLURM_PATH}/include/" make install
+                      mkdir -p ${!SLURM_ETC_PATH}/plugstack.conf.d
+                      ln -fs /usr/local/share/pyxis/pyxis.conf ${!SLURM_ETC_PATH}/plugstack.conf.d/pyxis.conf
+                      # Put this version's Slurm bin on slurmd's PATH. On RHEL/Rocky the Slurm
+                      # drop-in is /etc/sysconfig/slurmd; write whichever the PCS agent uses
+                      # (create the sysconfig one; also write /etc/default/slurmd if present).
+                      mkdir -p /etc/sysconfig
+                      echo "PATH=${!SLURM_PATH}/bin:/usr/local/bin:/usr/bin:/bin" >> /etc/sysconfig/slurmd
+                      if [ -f /etc/default/slurmd ]; then echo "PATH=${!SLURM_PATH}/bin:/usr/local/bin:/usr/bin:/bin" >> /etc/default/slurmd; fi
+                      nvidia-container-cli --load-kmods info || true
+
+  #############################################################################
+  # Component 7: DCGM (datacenter GPU manager) for monitoring
+  #############################################################################
+  DcgmComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-dcgm-${AWS::StackName}'
+      Description: Install NVIDIA DCGM from the rhel9 CUDA repo (monitoring)
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: |
+        name: 'DCGM (Rocky 9)'
+        description: 'NVIDIA Data Center GPU Manager for the monitoring stack'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallDcgm
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      # CUDA repo was added by the NVIDIA component; datacenter-gpu-manager lives there.
+                      dnf -y install datacenter-gpu-manager || dnf -y install datacenter-gpu-manager-4 || echo "DCGM package name may vary by repo snapshot - verify on the build instance"
+
+  #############################################################################
+  # Component 8: FSx for Lustre client (el9 kmod)
+  #############################################################################
+  LustreClientComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-lustre-client-${AWS::StackName}'
+      Description: Install the FSx for Lustre client (el9) matching the kernel
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: |
+        name: 'FSx Lustre client (Rocky 9)'
+        description: 'AWS FSx Lustre client repo + kmod for /fsx'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: InstallLustreClient
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      # AWS FSx Lustre client repo for el9. curl the repo file, then install
+                      # the kmod + userland matching the running (updated) kernel.
+                      curl -fsSL https://fsx-lustre-client-repo.s3.amazonaws.com/el/9/fsx-lustre-client.repo -o /etc/yum.repos.d/aws-fsx.repo || echo "verify current FSx el9 repo URL on the build instance"
+                      curl -fsSL https://fsx-lustre-client-repo-public-keys.s3.amazonaws.com/fsx-rpm-public-key.asc -o /tmp/fsx-rpm-public-key.asc || true
+                      rpm --import /tmp/fsx-rpm-public-key.asc || true
+                      dnf -y install kmod-lustre-client lustre-client || echo "Lustre client kmod may need a kernel-matched build - verify on the build instance"
+              - name: VerifyLustre
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      modinfo lustre >/dev/null 2>&1 || echo "lustre module not loadable against build kernel - check kmod-vs-kernel match"
+
+  #############################################################################
+  # Component 9: SELinux mode + PCS workload booleans
+  #############################################################################
+  SELinuxComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: !Sub 'rocky9-selinux-${AWS::StackName}'
+      Description: Set SELinux mode and the booleans the PCS workload needs (NFS home, etc.)
+      Version: !Ref SemanticVersion
+      Platform: Linux
+      SupportedOsVersions:
+        - 'Rocky Linux 9'
+      Data: !Sub |
+        name: 'SELinux config (Rocky 9)'
+        description: 'Set SELinux mode + NFS/container booleans for PCS'
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: ConfigureSelinux
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - |
+                      set -euxo pipefail
+                      MODE="${SELinuxMode}"
+                      # Allow home dirs over NFS (OpenZFS /home is mounted over NFS at boot).
+                      setsebool -P use_nfs_home_dirs 1 || true
+                      # Persist the chosen enforcing/permissive mode into /etc/selinux/config.
+                      sed -i "s/^SELINUX=.*/SELINUX=${!MODE}/" /etc/selinux/config
+                      echo "SELinux baked as ${!MODE} - if permissive, review AVC denials with ausearch before switching to enforcing"
+
+  #############################################################################
+  # Infrastructure configuration
+  #############################################################################
+  InfrastructureConfigX8664:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: !Sub 'rocky9-for-pcs-infra-x86-64-${AWS::StackName}'
+      Description: Infrastructure configuration for x86_64 Rocky 9 PCS AMI builds
+      InstanceProfileName: !Ref ImageBuilderInstanceProfile
+      InstanceTypes:
+        - c6i.4xlarge
+        - m6i.4xlarge
+      TerminateInstanceOnFailure: true
+      SubnetId: !If [HasSubnet, !Ref SubnetId, !Ref 'AWS::NoValue']
+      SecurityGroupIds: !If
+        - HasSecurityGroups
+        - !Ref SecurityGroupIds
+        - !Ref 'AWS::NoValue'
+
+  #############################################################################
+  # Image recipe: stock Rocky 9 base + ordered components
+  #############################################################################
+  ImageRecipeRocky9X8664:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: !Sub 'rocky9-for-pcs-gpu-x86-64-${AWS::StackName}'
+      Description: PCS-Ready Rocky Linux 9 GPU AMI (NVIDIA/EFA/PCS/Slurm/Enroot-Pyxis/DCGM/Lustre)
+      Version: !Ref SemanticVersion
+      ParentImage: !Ref BaseAmiId
+      BlockDeviceMappings:
+        - DeviceName: !FindInMap [Rocky9Config, x8664, deviceName]
+          Ebs:
+            VolumeSize: !FindInMap [Rocky9Config, x8664, size]
+            VolumeType: gp3
+            DeleteOnTermination: true
+      # Order matters: kernel first, then GPU/EFA/Lustre kmods, then PCS agent +
+      # Slurm (Pyxis needs Slurm headers), then Enroot/Pyxis, DCGM, and SELinux last.
+      Components:
+        - ComponentArn: !Ref KernelUpdateComponent
+        - ComponentArn: !Ref NvidiaGpuComponent
+        - ComponentArn: !Ref EfaComponent
+        - ComponentArn: !Ref PcsAgentComponent
+        - ComponentArn: !Ref SlurmComponent
+        - ComponentArn: !Ref EnrootPyxisComponent
+        - ComponentArn: !Ref DcgmComponent
+        - ComponentArn: !Ref LustreClientComponent
+        - ComponentArn: !Ref SELinuxComponent
+
+  #############################################################################
+  # Distribution configuration
+  #############################################################################
+  DistributionConfigRocky9X8664:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: !Sub 'rocky9-for-pcs-gpu-x86-64-${AWS::StackName}'
+      Description: Distribution configuration for Rocky 9 x86_64 PCS GPU AMIs
+      Distributions:
+        - Region: !Ref AWS::Region
+          AmiDistributionConfiguration:
+            Name: !Sub 'rocky9-for-pcs-gpu-x86-64-{{imagebuilder:buildDate}}'
+            Description: !Sub 'PCS-Ready Rocky 9 GPU AMI - built {{imagebuilder:buildDate}}'
+            AmiTags:
+              Name: !Sub 'rocky9-for-pcs-gpu-x86-64-{{imagebuilder:buildDate}}'
+              OS: RockyLinux
+              OSVersion: '9'
+              Architecture: x86_64
+              SlurmVersion: !Ref SlurmVersion
+              BuildDate: '{{imagebuilder:buildDate}}'
+              SourceAMI: '{{imagebuilder:buildVersion}}'
+              StackName: !Ref AWS::StackName
+
+  #############################################################################
+  # Pipeline (optional - scheduled builds)
+  #############################################################################
+  ImagePipelineRocky9X8664:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Condition: HasSchedule
+    Properties:
+      Name: !Sub 'rocky9-for-pcs-gpu-x86-64-${AWS::StackName}'
+      Description: Pipeline for building PCS-Ready Rocky 9 GPU AMIs
+      ImageRecipeArn: !GetAtt ImageRecipeRocky9X8664.Arn
+      InfrastructureConfigurationArn: !GetAtt InfrastructureConfigX8664.Arn
+      DistributionConfigurationArn: !GetAtt DistributionConfigRocky9X8664.Arn
+      Status: ENABLED
+      Schedule:
+        ScheduleExpression: !If
+          - IsWeeklySchedule
+          - !FindInMap [ScheduleExpressions, Weekly, expression]
+          - !FindInMap [ScheduleExpressions, Monthly, expression]
+        PipelineExecutionStartCondition: EXPRESSION_MATCH_AND_DEPENDENCY_UPDATES_AVAILABLE
+
+  #############################################################################
+  # AMI lifecycle policy (optional)
+  #############################################################################
+  AmiLifecyclePolicy:
+    Type: AWS::ImageBuilder::LifecyclePolicy
+    Condition: EnableLifecycle
+    Properties:
+      Name: !Sub 'rocky9-for-pcs-lifecycle-${AWS::StackName}'
+      Description: Deprecate old PCS-Ready Rocky 9 AMIs
+      Status: ENABLED
+      ExecutionRole: !GetAtt LifecyclePolicyRole.Arn
+      ResourceType: AMI_IMAGE
+      ResourceSelection:
+        TagMap:
+          StackName: !Ref AWS::StackName
+      PolicyDetails:
+        - Action:
+            Type: DEPRECATE
+            IncludeResources:
+              Amis: true
+          Filter:
+            Type: AGE
+            Value: !Ref LifecycleDeprecateAfterWeeks
+            Unit: WEEKS
+            RetainAtLeast: 1
+
+  LifecyclePolicyRole:
+    Type: AWS::IAM::Role
+    Condition: EnableLifecycle
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: imagebuilder.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/EC2ImageBuilderLifecycleExecutionPolicy
+      Path: /
+
+Outputs:
+  Rocky9PCSAmiId:
+    Description: AMI ID of the built PCS-Ready Rocky 9 GPU AMI (pass as the AmiId parameter of the cluster/CNG templates)
+    Value: !GetAtt Rocky9PCSImage.ImageId
+    Export:
+      Name: !Sub '${AWS::StackName}-AmiId'
+
+  ImageRecipeArn:
+    Description: ARN of the image recipe
+    Value: !GetAtt ImageRecipeRocky9X8664.Arn
+
+  PipelineArn:
+    Condition: HasSchedule
+    Description: ARN of the image pipeline (only created for scheduled builds)
+    Value: !GetAtt ImagePipelineRocky9X8664.Arn

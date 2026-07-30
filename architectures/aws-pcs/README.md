@@ -722,6 +722,7 @@ parameter and default, see [PARAMETERS.md](./docs/PARAMETERS.md).
 | [`add-cng-g6e.yaml`](./assets/add-cng-g6e.yaml) | g6e.48xlarge nodes (4 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g6e.yaml&stackName=pcs-add-cng-g6e) |
 | [`add-cng-g6e-24xl.yaml`](./assets/add-cng-g6e-24xl.yaml) | g6e.24xlarge nodes (2 EFA interfaces) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/add-cng-g6e-24xl.yaml&stackName=pcs-add-cng-g6e-24xl) |
 | [`pcs-ready-dlami-with-enroot-pyxis.yaml`](./assets/pcs-ready-dlami-with-enroot-pyxis.yaml) | EC2 Image Builder: bake Enroot 3.5.0 + Pyxis 0.20.0 into the PCS-Ready DLAMI | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ready-dlami-with-enroot-pyxis.yaml&stackName=pcs-dlami) |
+| [`pcs-ready-rocky9-gpu.yaml`](./assets/pcs-ready-rocky9-gpu.yaml) | EC2 Image Builder: build a PCS-Ready **Rocky Linux 9** GPU AMI from stock (NVIDIA/CUDA, EFA, PCS agent, Slurm, Enroot/Pyxis, DCGM, Lustre client). See [ROCKY9-AMI.md](./docs/ROCKY9-AMI.md) | [![Launch](images/launch-stack.svg)](https://console.aws.amazon.com/cloudformation/home#/stacks/quickcreate?templateUrl=https://awsome-distributed-ai.s3.amazonaws.com/templates/pcs-ready-rocky9-gpu.yaml&stackName=pcs-rocky9) |
 
 `add-cng*` templates create a Slurm queue only when `QueueName` is set (leave it empty
 for login nodes). The P-series templates need a `CapacityReservationId` when using a
@@ -784,7 +785,8 @@ External references (runtime):
   SSM /pcs/<cluster-id>/ldap/admin-password       ← auto-generated LDAP admin password
 
 Standalone (not nested):
-  pcs-ready-dlami-with-enroot-pyxis.yaml          ← AMI builder (separate stack)
+  pcs-ready-dlami-with-enroot-pyxis.yaml          ← Ubuntu DLAMI + Enroot/Pyxis builder (separate stack)
+  pcs-ready-rocky9-gpu.yaml                       ← Rocky Linux 9 GPU AMI builder (separate stack)
   cluster-admin-iam.yaml                          ← IAM admin policies + group (separate stack)
   cluster-user-iam.yaml                           ← IAM user policy + group (separate stack)
 ```

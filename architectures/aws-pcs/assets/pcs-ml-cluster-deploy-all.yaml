@@ -484,6 +484,9 @@ Parameters:
       can boot a newer AMI than the original nodes (drift). For production, pin to a
       specific ami-xxx -- e.g. one produced by pcs-ready-dlami-with-enroot-pyxis.yaml
       with Enroot/Pyxis pre-baked, or any other AMI built off the PCS-Ready DLAMI base.
+      To run on **Rocky Linux 9** instead of Ubuntu, build a PCS-Ready Rocky 9 GPU AMI
+      with pcs-ready-rocky9-gpu.yaml and pass its ami-xxx here -- the boot scripts
+      auto-detect the OS family (Ubuntu vs Rocky/RHEL). See docs/ROCKY9-AMI.md.
     Default: ''
     AllowedPattern: '^$|^ami-[0-9a-f]{8,17}$'
     ConstraintDescription: Must be empty or a valid AMI ID (ami-xxxxxxxxx)

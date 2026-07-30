@@ -464,6 +464,20 @@ Resources:
             MIME-Version: 1.0
 
             runcmd:
+            # SSM agent (Rocky/RHEL only). Stock Rocky lacks it; the Rocky PCS AMI installs it
+            # at build, but EC2 Image Builder's finalization REMOVES the agent from the output
+            # AMI (Image Builder uses SSM to orchestrate the build and uninstalls it on cleanup),
+            # so it is absent at first boot. Install-if-missing (region rpm via IMDS), then
+            # enable + start. No-op on Ubuntu (DLAMI ships SSM running) and on non-dnf systems.
+            - |
+              if command -v dnf >/dev/null 2>&1; then
+                if ! rpm -q amazon-ssm-agent >/dev/null 2>&1; then
+                  TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+                  R=$(curl -s -H "X-aws-ec2-metadata-token: ${!TOKEN}" http://169.254.169.254/latest/meta-data/placement/region)
+                  dnf install -y "https://s3.${!R}.amazonaws.com/amazon-ssm-${!R}/latest/linux_amd64/amazon-ssm-agent.rpm" || true
+                fi
+                systemctl enable --now amazon-ssm-agent || true
+              fi
             # Post-install script (optional) - generic OnNodeConfigured-style hook.
             # Downloads and runs a user-supplied script (e.g. Enroot/Pyxis install).
             - |
@@ -500,12 +514,17 @@ Resources:
                   echo "WARNING: failed to fetch gpu-healthcheck.tar.gz; prolog will be missing on this node" | tee -a /var/log/pcs-gpu-healthcheck-install.log
                 fi
               fi
-            # FSx Home directories mount
+            # FSx Home directories mount. Works on both Ubuntu (SELinux absent) and
+            # Rocky/RHEL (SELinux enforcing): the SELinux step is guarded on sestatus,
+            # so it is a no-op where SELinux is not present and load-bearing where it is.
             - mkdir -p /tmp/home
             - rsync -aA /home/ /tmp/home
             - echo "${FSxOpenZFSFilesystemId}.fsx.${AWS::Region}.amazonaws.com:/fsx/ /home nfs noatime,nfsvers=3,sync,nconnect=16,rsize=1048576,wsize=1048576,defaults 0 0" >> /etc/fstab
             - mount -a -t nfs defaults
-            - if [ "enabled" = "$(sestatus | awk '/^SELinux status:/{print $3}')" ]; then setsebool -P use_nfs_home_dirs 1; fi
+            # SELinux (Rocky/RHEL): allow home over NFS. On Ubuntu sestatus is absent so
+            # this whole line is a no-op. The Rocky PCS AMI is built permissive by default
+            # (denials logged, not enforced); these booleans make the enforcing path work too.
+            - if command -v sestatus >/dev/null 2>&1 && [ "enabled" = "$(sestatus | awk '/^SELinux status:/{print $3}')" ]; then setsebool -P use_nfs_home_dirs 1 || true; fi
             - rsync -aA --ignore-existing /tmp/home/ /home
             - rm -rf /tmp/home/
             # If provided, mount FSxL filesystem as /fsx
