@@ -170,7 +170,8 @@ enroot version && lfs --version                           # container runtime + 
 
 Then deploy with this `AmiId` and confirm the node groups **register** — go `ACTIVE` in the
 PCS API (`aws pcs list-compute-node-groups ...`), which is the authoritative registration
-signal. (See the DNS-SRV caveat below before relying on `sinfo` from the login node.)
+signal. (`sinfo`/`squeue` from the login node also work once slurmd has its `--conf-server` —
+see the slurmd `--conf-server` caveat below, now fixed.)
 
 ## Caveats and known follow-ups
 
@@ -201,13 +202,20 @@ signal. (See the DNS-SRV caveat below before relying on `sinfo` from the login n
   CNG UserData installs it if missing at first boot so pre-v1.3.0 AMIs self-heal. **Verified**
   on the live deploy: with `aws` present the post-install chain runs to exit 0 (enroot 3.5.0,
   Pyxis wired into `plugstack.conf.d`). Bake-in requires a **rebuild** (bump `SemanticVersion`).
-- **`sinfo` / DNS-SRV controller resolution (known follow-up).** On the Rocky login node,
-  `sinfo` fails with `resolve_ctls_from_dns_srv ... DNS SRV lookup failed` — PCS resolves the
-  Slurm controller/config via DNS SRV, and the Rocky AMI does not yet reproduce the Slurm
-  client config the AWS Ubuntu DLAMI ships for this. **Node-group registration and job
-  scheduling are unaffected** (the controller schedules; `sinfo` is a client view) and
-  registration is confirmed via the PCS API. Wiring up the login-node Slurm client config
-  (so `sinfo`/`squeue` work directly) is an open follow-up.
+- **slurmd `--conf-server` vs a pre-baked `/etc/sysconfig/slurmd` (FIXED — was the DNS-SRV
+  follow-up, and it was worse than "sinfo doesn't work").** The Enroot/Pyxis step used to write
+  the Slurm-bin PATH into `/etc/sysconfig/slurmd`. But the PCS agent's first-boot
+  `pcs_bootstrap_config_per_instance.sh` writes that same file with
+  `SLURMD_OPTIONS='--conf-server=<ctl>:6817 ...'` **only `if [ ! -f ]`** — so pre-creating it
+  made PCS skip the controller endpoint. slurmd then fell back to a DNS-SRV controller lookup
+  that fails on Rocky (`resolve_ctls_from_dns_srv: Unknown host`), **never started, and PCS
+  health-replaced the node** (seen as a ~30-min login-node replacement — not just a broken
+  `sinfo`). Fix: set the PATH via a **systemd drop-in** (`slurmd.service.d/10-slurm-path.conf`)
+  instead, leaving `/etc/sysconfig/slurmd` for the PCS agent — in the AMI build, the
+  `install-enroot-pyxis.sh` RHEL branch, **and** a CNG-UserData self-heal so pre-v1.3.0 AMIs
+  recover at first boot (runs after the PCS bootcmd, before `pcs_bootstrap_finalize.sh` starts
+  slurmd). **Verified live:** slurmd goes `active` with `--conf-server`, and `sinfo -N` from the
+  Rocky login node lists all queues — so this also closes the old `sinfo`/DNS-SRV follow-up.
 - **Interactive user is `rocky`, not `ubuntu`.** Any docs/scripts/UserData that assume the
   `ubuntu` user need the OS-aware branch (the boot scripts already detect this). Spot-check
   when adding new boot-time logic.

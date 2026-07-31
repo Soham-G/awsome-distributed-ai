@@ -266,15 +266,32 @@ else
   echo "WARN: PCS_SLURM_VERSION='${PCS_SLURM_VERSION}' not usable; falling back to newest installed Slurm bin"
   SLURM_BIN=$(ls -d /opt/aws/pcs/scheduler/slurm-*/bin 2>/dev/null | sort -rV | head -1)
 fi
-SLURMD_PATH_LINE="PATH=${SLURM_BIN}:/usr/lib/ccache/bin:/usr/local/bin:/usr/bin:/bin"
-# Write the slurmd env file for this OS family (Debian: /etc/default/slurmd,
-# RHEL/Rocky: /etc/sysconfig/slurmd). Drop any prior PATH= line this script added
-# (idempotent across re-runs), then append. Ensure the parent dir exists on a fresh AMI.
-mkdir -p "$(dirname "${SLURMD_ENV_FILE}")"
-touch "${SLURMD_ENV_FILE}"
-sed -i '\#^PATH=/opt/aws/pcs/scheduler/slurm-#d' "${SLURMD_ENV_FILE}" 2>/dev/null || true
-echo "${SLURMD_PATH_LINE}" >> "${SLURMD_ENV_FILE}"
-echo "slurmd PATH set to use ${SLURM_BIN} (via ${SLURMD_ENV_FILE})"
+SLURMD_PATH_VALUE="${SLURM_BIN}:/usr/lib/ccache/bin:/usr/local/bin:/usr/bin:/bin"
+# Put the Slurm bin on slurmd's PATH. HOW differs by OS, and this matters:
+#   RHEL/Rocky: use a systemd DROP-IN, NOT /etc/sysconfig/slurmd. The PCS agent's
+#     first-boot pcs_bootstrap_config_per_instance.sh writes /etc/sysconfig/slurmd
+#     with SLURMD_OPTIONS='--conf-server=<ctl:port> ...' ONLY if that file does not
+#     already exist. If this script (which can run at build time OR first boot)
+#     pre-creates it, PCS skips it, slurmd starts with no --conf-server, falls back
+#     to a DNS-SRV controller lookup that fails ("resolve_ctls_from_dns_srv: Unknown
+#     host"), never starts, and PCS health-replaces the node. A drop-in sets PATH
+#     independently and merges with the PCS-owned EnvironmentFile.
+#   Debian/Ubuntu: the DLAMI already ships /etc/default/slurmd created by its agent,
+#     so appending a PATH= line there is safe (validated) and left unchanged.
+if [ "${OS_FAMILY}" = "rhel" ]; then
+  mkdir -p /etc/systemd/system/slurmd.service.d
+  printf '[Service]\nEnvironment=PATH=%s\n' "${SLURMD_PATH_VALUE}" \
+    > /etc/systemd/system/slurmd.service.d/10-slurm-path.conf
+  systemctl daemon-reload 2>/dev/null || true
+  echo "slurmd PATH set to use ${SLURM_BIN} (via systemd drop-in 10-slurm-path.conf; leaves /etc/sysconfig/slurmd for the PCS agent)"
+else
+  # Drop any prior PATH= line this script added (idempotent across re-runs), then append.
+  mkdir -p "$(dirname "${SLURMD_ENV_FILE}")"
+  touch "${SLURMD_ENV_FILE}"
+  sed -i '\#^PATH=/opt/aws/pcs/scheduler/slurm-#d' "${SLURMD_ENV_FILE}" 2>/dev/null || true
+  echo "PATH=${SLURMD_PATH_VALUE}" >> "${SLURMD_ENV_FILE}"
+  echo "slurmd PATH set to use ${SLURM_BIN} (via ${SLURMD_ENV_FILE})"
+fi
 
 # Load GPU kernel modules if GPU detected
 if nvidia-smi 2>/dev/null; then

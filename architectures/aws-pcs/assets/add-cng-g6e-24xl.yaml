@@ -487,6 +487,31 @@ Resources:
               if command -v dnf >/dev/null 2>&1 && ! command -v aws >/dev/null 2>&1; then
                 dnf install -y awscli2 || dnf install -y awscli || true
               fi
+            # slurmd controller self-heal (Rocky/RHEL only; pre-v1.3.0 AMIs). The Rocky PCS
+            # AMI baked /etc/sysconfig/slurmd with only a PATH= line. The PCS agent's early
+            # bootcmd writes that file with SLURMD_OPTIONS='--conf-server=<ctl:port> ...'
+            # ONLY if it does not already exist -- so on those AMIs it is SKIPPED, slurmd
+            # starts with no --conf-server, falls back to a DNS-SRV lookup that fails
+            # ("resolve_ctls_from_dns_srv: Unknown host"), never starts, and PCS
+            # health-REPLACES the node. This runcmd runs AFTER the PCS bootcmd but BEFORE
+            # pcs_bootstrap_finalize.sh starts slurmd, so healing here fixes the very first
+            # slurmd start: move the baked PATH into a systemd drop-in, delete the file, and
+            # re-run the PCS per-instance config so it writes the real --conf-server options.
+            # No-op once the AMI stops baking the file (v1.3.0+) and on Ubuntu.
+            - |
+              if command -v dnf >/dev/null 2>&1 && [ -f /etc/sysconfig/slurmd ] \
+                 && ! grep -q SLURMD_OPTIONS /etc/sysconfig/slurmd \
+                 && [ -x /opt/aws/pcs/bin/pcs_bootstrap_config_per_instance.sh ]; then
+                SLURMD_PATH=$(sed -n 's/^PATH=//p' /etc/sysconfig/slurmd | head -1)
+                if [ -n "${!SLURMD_PATH}" ]; then
+                  mkdir -p /etc/systemd/system/slurmd.service.d
+                  printf '[Service]\nEnvironment=PATH=%s\n' "${!SLURMD_PATH}" \
+                    > /etc/systemd/system/slurmd.service.d/10-slurm-path.conf
+                fi
+                rm -f /etc/sysconfig/slurmd
+                /opt/aws/pcs/bin/pcs_bootstrap_config_per_instance.sh /etc/amazon/pcs/bootstrap_config.json || true
+                systemctl daemon-reload || true
+              fi
             # Post-install script (optional) - generic OnNodeConfigured-style hook.
             # Downloads and runs a user-supplied script (e.g. Enroot/Pyxis install).
             - |

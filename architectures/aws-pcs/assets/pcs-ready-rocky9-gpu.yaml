@@ -689,12 +689,20 @@ Resources:
                       CPPFLAGS="-I ${!SLURM_PATH}/include/" make install
                       mkdir -p ${!SLURM_ETC_PATH}/plugstack.conf.d
                       ln -fs /usr/local/share/pyxis/pyxis.conf ${!SLURM_ETC_PATH}/plugstack.conf.d/pyxis.conf
-                      # Put this version's Slurm bin on slurmd's PATH. On RHEL/Rocky the Slurm
-                      # drop-in is /etc/sysconfig/slurmd; write whichever the PCS agent uses
-                      # (create the sysconfig one; also write /etc/default/slurmd if present).
-                      mkdir -p /etc/sysconfig
-                      echo "PATH=${!SLURM_PATH}/bin:/usr/local/bin:/usr/bin:/bin" >> /etc/sysconfig/slurmd
-                      if [ -f /etc/default/slurmd ]; then echo "PATH=${!SLURM_PATH}/bin:/usr/local/bin:/usr/bin:/bin" >> /etc/default/slurmd; fi
+                      # Put this version's Slurm bin on slurmd's PATH via a systemd DROP-IN,
+                      # NOT by pre-creating /etc/sysconfig/slurmd. CRITICAL: the PCS agent's
+                      # first-boot pcs_bootstrap_config_per_instance.sh writes
+                      # /etc/sysconfig/slurmd with SLURMD_OPTIONS='--conf-server=<ctl:port> ...'
+                      # ONLY `if [ ! -f /etc/sysconfig/slurmd ]`. If we bake that file at build
+                      # time (even with just a PATH= line), PCS SKIPS it, slurmd starts with no
+                      # --conf-server, falls back to a DNS-SRV controller lookup that fails
+                      # ("resolve_ctls_from_dns_srv: Unknown host"), never starts, and PCS
+                      # health-replaces the node. A drop-in sets PATH independently and merges
+                      # with the PCS-owned EnvironmentFile, so both --conf-server and PATH apply.
+                      mkdir -p /etc/systemd/system/slurmd.service.d
+                      printf '[Service]\nEnvironment=PATH=%s/bin:/usr/local/bin:/usr/bin:/bin\n' "${!SLURM_PATH}" \
+                        > /etc/systemd/system/slurmd.service.d/10-slurm-path.conf
+                      systemctl daemon-reload || true
                       nvidia-container-cli --load-kmods info || true
 
   #############################################################################
