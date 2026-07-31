@@ -13,7 +13,12 @@ base**. This template builds the whole stack from a stock Rocky 9 cloud image us
 installers, in this order (EC2 Image Builder reboots between kmod layers):
 
 1. **Kernel update + toolchain** — `dnf -y update`, EPEL, Development Tools, matching
-   `kernel-devel`; reboot.
+   `kernel-devel`, the SSM agent, and the **AWS CLI v2** (`awscli2`); reboot. The AWS CLI is
+   load-bearing for the boot path, not just build tooling — stock Rocky 9 has no `aws` (unlike
+   the Ubuntu DLAMI), and the first-boot scripts use it for `aws s3 cp` (post-install /
+   Enroot-Pyxis, GPU health-check) and `aws ssm` (monitoring Grafana secret). Without it those
+   steps fail `aws: command not found`. Baked in from **v1.3.0** onward; the CNG UserData also
+   installs it if missing so older AMIs self-heal at first boot.
 2. **NVIDIA driver + CUDA + container toolkit** — from NVIDIA's rhel9 CUDA dnf repo.
 3. **EFA** — the `aws-efa-installer` (GPG-verified).
 4. **AWS PCS agent** — the AWS agent installer (GPG-verified). *Required* for the node to
@@ -184,7 +189,18 @@ signal. (See the DNS-SRV caveat below before relying on `sinfo` from the login n
   Image Builder removes it from the output AMI on cleanup (it uses SSM to orchestrate the
   build). The fix lives in the **CNG UserData**, which reinstalls-if-missing + enables the
   agent at first boot (Rocky/RHEL only). This is why nodes are SSM-reachable despite the AMI
-  itself shipping without a running agent. **Verified.**
+  itself shipping without a running agent. **Verified** on a live `pcs-rocky9-cluster` deploy
+  (us-east-2, login node on Rocky 9.8): the agent self-installed within ~2 min of boot and the
+  node registered `Online` (`amazon-ssm-agent-3.3.4851.0`), reachable via `aws ssm
+  start-session` / `send-command`.
+- **AWS CLI is absent on stock Rocky and must be baked in.** Unlike the Ubuntu DLAMI, Rocky 9
+  ships no `aws` CLI, so the first-boot scripts that use it — post-install/Enroot-Pyxis fetch
+  (`aws s3 cp`), GPU health-check tarball fetch (`aws s3 cp`), monitoring Grafana secret
+  (`aws ssm put-parameter`) — failed `aws: command not found` (exit 127) on early AMIs.
+  Fixed two ways: the build now installs `awscli2` (kernel/toolchain component), **and** the
+  CNG UserData installs it if missing at first boot so pre-v1.3.0 AMIs self-heal. **Verified**
+  on the live deploy: with `aws` present the post-install chain runs to exit 0 (enroot 3.5.0,
+  Pyxis wired into `plugstack.conf.d`). Bake-in requires a **rebuild** (bump `SemanticVersion`).
 - **`sinfo` / DNS-SRV controller resolution (known follow-up).** On the Rocky login node,
   `sinfo` fails with `resolve_ctls_from_dns_srv ... DNS SRV lookup failed` — PCS resolves the
   Slurm controller/config via DNS SRV, and the Rocky AMI does not yet reproduce the Slurm

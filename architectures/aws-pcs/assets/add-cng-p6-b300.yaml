@@ -412,6 +412,16 @@ Resources:
                 fi
                 systemctl enable --now amazon-ssm-agent || true
               fi
+            # AWS CLI (Rocky/RHEL only). Stock Rocky lacks the `aws` CLI (the Ubuntu DLAMI
+            # ships it), and the Rocky PCS AMI only bakes it in from the v1.3.0 build onward
+            # -- so on an older AMI the post-install (s3 cp), GPU-healthcheck (s3 cp), and
+            # monitoring (ssm put-parameter) runcmds below fail "aws: command not found"
+            # (exit 127). Install-if-missing from appstream before anything uses `aws`.
+            # No-op on Ubuntu (aws already on PATH) and on non-dnf systems.
+            - |
+              if command -v dnf >/dev/null 2>&1 && ! command -v aws >/dev/null 2>&1; then
+                dnf install -y awscli2 || dnf install -y awscli || true
+              fi
             # Post-install script (optional) - generic OnNodeConfigured-style hook.
             # Downloads and runs a user-supplied script (e.g. Enroot/Pyxis install).
             - |

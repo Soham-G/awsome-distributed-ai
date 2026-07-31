@@ -357,6 +357,15 @@ Resources:
                       retry dnf -y install epel-release || retry dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
                       retry dnf -y groupinstall "Development Tools"
                       retry dnf -y install dkms wget curl git jq gcc gcc-c++ make
+                      # AWS CLI v2. Load-bearing for the boot path, NOT just a build
+                      # convenience: the CNG UserData and every first-boot script use `aws`
+                      # (s3 cp for the post-install/Enroot-Pyxis + GPU-healthcheck fetches,
+                      # ssm put-parameter for the monitoring Grafana secret, etc.). Unlike
+                      # the AWS Ubuntu PCS-Ready DLAMI, stock Rocky 9 has NO aws CLI, so
+                      # those steps fail with "aws: command not found" (exit 127) unless we
+                      # bake it in. appstream ships awscli2 (v2.x) -- no pip/unzip needed.
+                      retry dnf -y install awscli2
+                      command -v aws
                       # kernel-devel/headers convenience copy (latest; NOT pinned to the pre-reboot
                       # running kernel whose -devel may be gone from the repos). Non-fatal -- the
                       # NVIDIA component (post-reboot) authoritatively installs the booted kernel's devel.
