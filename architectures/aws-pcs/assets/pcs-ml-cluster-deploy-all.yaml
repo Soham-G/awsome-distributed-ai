@@ -302,6 +302,10 @@ Metadata:
         default: "FSx for Lustre (/fsx) version"
       FSxLustreEnableEfa:
         default: "FSx for Lustre (/fsx) EFA + GDS support (PERSISTENT_2 only)"
+      DataRepositoryS3Bucket:
+        default: "FSx for Lustre (/fsx/s3) linked S3 bucket (empty = none)"
+      DataRepositoryS3Path:
+        default: "FSx for Lustre S3 link: key prefix (empty = whole bucket)"
       HomeCapacity:
         default: "FSx for OpenZFS (/home) capacity (GiB)"
       HomeThroughput:
@@ -418,6 +422,27 @@ Parameters:
     AllowedValues:
       - 'true'
       - 'false'
+
+  DataRepositoryS3Bucket:
+    Description: >-
+      (Optional) Name of an existing S3 bucket to link to the FSx for Lustre
+      filesystem. Leave EMPTY (default) for no S3 link. When set, a Data Repository
+      Association maps the bucket under /fsx/s3: S3 objects are lazily imported and
+      changes under /fsx/s3 are auto-exported back (bidirectional). REQUIRES the
+      bucket to be in this cluster's Region and LustreDeploymentType=PERSISTENT_2
+      (default). Provide the bare bucket name, not an s3:// URI.
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be empty or a valid S3 bucket name (3-63 chars, lowercase).
+
+  DataRepositoryS3Path:
+    Description: >-
+      (Optional) Key prefix within DataRepositoryS3Bucket to link (e.g. "data/").
+      Empty (default) links the whole bucket. Ignored when DataRepositoryS3Bucket
+      is empty. Just the key prefix — no bucket name or s3:// scheme.
+    Type: String
+    Default: ''
 
   # Multi-user directory
   DirectoryService:
@@ -1171,6 +1196,8 @@ Resources:
         Compression: !Ref Compression
         LustreVersion: !Ref LustreVersion
         FSxLustreEnableEfa: !Ref FSxLustreEnableEfa
+        DataRepositoryS3Bucket: !Ref DataRepositoryS3Bucket
+        DataRepositoryS3Path: !Ref DataRepositoryS3Path
         HomeCapacity: !Ref HomeCapacity
         HomeThroughput: !Ref HomeThroughput
         OpenZFSDeploymentType: !Ref OpenZFSDeploymentType

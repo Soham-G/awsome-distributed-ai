@@ -158,6 +158,32 @@ Parameters:
       - 'true'
       - 'false'
 
+  DataRepositoryS3Bucket:
+    Description: >-
+      (Optional) Name of an existing S3 bucket to link to the FSx for Lustre
+      filesystem as a data repository. Leave EMPTY (default) for no S3 link. When
+      set, a Data Repository Association (DRA) is created that maps the bucket's
+      contents under /fsx/s3 on the filesystem: S3 objects are lazily imported and
+      changes on /fsx/s3 are auto-exported back to the bucket (bidirectional).
+      HARD REQUIREMENTS: (1) the bucket MUST be in the SAME Region as the cluster
+      (DRAs are single-Region); (2) LustreDeploymentType must be PERSISTENT_2 (a
+      Rule below fails the stack otherwise — DRAs are unsupported on scratch_1, and
+      subdir mapping + auto-export need PERSISTENT_2). Provide the bare bucket
+      name, not an s3:// URI.
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be empty or a valid S3 bucket name (3-63 chars, lowercase).
+
+  DataRepositoryS3Path:
+    Description: >-
+      (Optional) Key prefix within DataRepositoryS3Bucket to link (e.g. "data/"
+      links only s3://<bucket>/data/). Empty (default) links the whole bucket.
+      Ignored when DataRepositoryS3Bucket is empty. Do NOT include the bucket name
+      or s3:// scheme — just the key prefix.
+    Type: String
+    Default: ''
+
   HomeCapacity:
     Description: "Home directories storage capacity in GiB"
     Type: Number
@@ -239,6 +265,17 @@ Rules:
         AssertDescription: >-
           FSxLustreEnableEfa=true requires LustreDeploymentType=PERSISTENT_2
           (EFA on FSx for Lustre is a PERSISTENT_2-only feature).
+  # An S3 Data Repository Association needs PERSISTENT_2 (subdirectory mapping and
+  # auto-export are PERSISTENT_2-only; DRAs are unsupported on scratch_1). Fail
+  # fast rather than let CreateDataRepositoryAssociation error out later.
+  DataRepositoryRequiresPersistent2:
+    RuleCondition: !Not [!Equals [!Ref DataRepositoryS3Bucket, '']]
+    Assertions:
+      - Assert: !Equals [!Ref LustreDeploymentType, 'PERSISTENT_2']
+        AssertDescription: >-
+          Setting DataRepositoryS3Bucket requires LustreDeploymentType=PERSISTENT_2
+          (S3 data repository associations with subdir mapping + auto-export are a
+          PERSISTENT_2-only feature).
 
 
 ###############################
@@ -263,6 +300,12 @@ Conditions:
   FSxLustreEfaEnabled: !And
     - !Equals [!Ref 'FSxLustreEnableEfa', 'true']
     - !Condition LustreIsPersistent2
+  # Link an S3 bucket to Lustre (Data Repository Association) only when a bucket
+  # name is provided. The DataRepositoryRequiresPersistent2 Rule fails the stack
+  # at create time if this is set on PERSISTENT_1.
+  HasDataRepository: !Not [!Equals [!Ref DataRepositoryS3Bucket, ""]]
+  # A prefix was given for the S3 link (vs. linking the whole bucket).
+  HasDataRepositoryPath: !Not [!Equals [!Ref DataRepositoryS3Path, ""]]
 
 #########################
 ## VPC & Network Setup ##
@@ -514,6 +557,41 @@ Resources:
           - true
           - !Ref AWS::NoValue
 
+  # Optional S3 link (Data Repository Association). Created only when
+  # DataRepositoryS3Bucket is set. Maps the bucket (or bucket/prefix) 1-1 with
+  # /fsx/s3 on the filesystem: S3 objects are lazily imported into that dir, and
+  # NEW/CHANGED/DELETED files under /fsx/s3 are auto-exported back to S3. The
+  # bucket must be in this cluster's Region (DRAs are single-Region) and the
+  # filesystem must be PERSISTENT_2 (enforced by the Rule above). FSx assumes an
+  # AWS service-linked role to reach S3 — no bucket policy or extra IAM needed for
+  # a same-account bucket. DataRepositoryPath is built as s3://<bucket>[/<prefix>].
+  FSxLustreS3DataRepository:
+    Type: AWS::FSx::DataRepositoryAssociation
+    Condition: HasDataRepository
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      FileSystemId: !Ref FSxLFilesystem
+      # Subdirectory (not "/") so the rest of /fsx stays plain scratch space.
+      FileSystemPath: /s3
+      DataRepositoryPath: !If
+        - HasDataRepositoryPath
+        - !Sub 's3://${DataRepositoryS3Bucket}/${DataRepositoryS3Path}'
+        - !Sub 's3://${DataRepositoryS3Bucket}'
+      # Import existing objects' metadata as soon as the association is created,
+      # so `ls /fsx/s3` shows the bucket contents without a manual import task.
+      BatchImportMetaDataOnCreate: true
+      S3:
+        # Lazy-import new/changed/deleted S3 objects into the filesystem view.
+        AutoImportPolicy:
+          Events: [NEW, CHANGED, DELETED]
+        # Auto-export filesystem changes back to the bucket (bidirectional).
+        AutoExportPolicy:
+          Events: [NEW, CHANGED, DELETED]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-fsx-s3-dra'
+
 
   OpenZFSFileSystem:
     Type: AWS::FSx::FileSystem
@@ -601,6 +679,21 @@ Outputs:
     Value: !Ref FSxLFilesystem
     Export:
       Name: !Sub ${AWS::StackName}-FSxLustreFilesystemId
+  FSxLustreS3DataRepositoryId:
+    Condition: HasDataRepository
+    Description: >-
+      Data Repository Association ID linking the S3 bucket to /fsx/s3 (empty when
+      DataRepositoryS3Bucket was not set).
+    Value: !Ref FSxLustreS3DataRepository
+    Export:
+      Name: !Sub ${AWS::StackName}-FSxLustreS3DataRepositoryId
+  FSxLustreS3DataRepositoryPath:
+    Condition: HasDataRepository
+    Description: The S3 path linked to /fsx/s3 on the Lustre filesystem.
+    Value: !If
+      - HasDataRepositoryPath
+      - !Sub 's3://${DataRepositoryS3Bucket}/${DataRepositoryS3Path}'
+      - !Sub 's3://${DataRepositoryS3Bucket}'
   FSxORootVolumeId:
     Description: The ID of FSx for OpenZFS root volume
     Value: !GetAtt OpenZFSFileSystem.RootVolumeId
