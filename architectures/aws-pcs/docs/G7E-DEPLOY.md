@@ -189,6 +189,8 @@ Useful parameter notes:
 | `DirectoryService` | `OpenLDAP-LoginNode` | Multi-user OpenLDAP on the login node + SSSD on compute nodes |
 | `MonitoringStack` | `none` | No Prometheus/Grafana/DCGM. Drop this param (default `Prometheus-LoginNode`) to enable monitoring |
 | `PostInstallScriptUrl` | `" "` (a single space) | Skips the first-boot Enroot/Pyxis install for faster boots during testing. **Leave this param off** (default empty) to auto-install Enroot/Pyxis — needed for containerized jobs (`srun --container-image=...`) |
+| `AmiId` | *(empty → DLAMI)* | Empty auto-resolves the latest PCS-Ready Ubuntu DLAMI. To run the GPU queues on **Rocky Linux 9** instead, build the Rocky AMI once and pass its `ami-xxx` here — see [Optional: Rocky Linux 9 AMI](#optional-run-on-rocky-linux-9) below |
+| `DataRepositoryS3Bucket` | *(empty → no link)* | (Optional) Link an existing S3 bucket to the Lustre `/fsx` filesystem — its contents appear under `/fsx/s3` and changes sync back (bidirectional). See [Optional: link an S3 bucket to /fsx](#optional-link-an-s3-bucket-to-fsx) below |
 
 > **Slurm accounting + multi-user.** `ManagedAccounting=enabled` pairs naturally with
 > `DirectoryService=OpenLDAP-LoginNode` so usage is attributed per real user. To enforce
@@ -227,6 +229,74 @@ aws cloudformation update-stack --stack-name pcs-gpu --region ${REGION} \
 
 The shell snippet carries every other existing parameter forward unchanged; you only
 spell out the ones you're changing. (Match `--stack-name` to your deployed stack.)
+
+### Optional: run on Rocky Linux 9
+
+By default every node group (login + g7/g7e/g6e) boots the AWS-published **PCS-Ready
+Ubuntu 24.04 DLAMI**. To run the GPU queues on **Rocky Linux 9** instead, build a
+PCS-Ready Rocky 9 GPU AMI once (a separate one-time stack, ~45–60 min) and pass its
+`ami-xxx` as `AmiId`. The GPU queues, EFA wiring, and per-AZ layout are all identical —
+only the OS image changes; the boot scripts auto-detect Rocky vs Ubuntu.
+
+```bash
+# One-time: build the Rocky 9 GPU AMI (see docs/ROCKY9-AMI.md for the full walkthrough).
+# BASE_AMI = a kernel-updated official Rocky 9 cloud AMI; SubnetId/SecurityGroupIds are
+# required in accounts with no default VPC.
+aws cloudformation create-stack \
+  --stack-name pcs-rocky9-ami \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ready-rocky9-gpu.yaml" \
+  --parameters \
+    ParameterKey=BaseAmiId,ParameterValue=${BASE_AMI} \
+    ParameterKey=SlurmVersion,ParameterValue=25.11 \
+    ParameterKey=SemanticVersion,ParameterValue=1.3.0 \
+    ParameterKey=SubnetId,ParameterValue=${SUBNET_ID} \
+    ParameterKey=SecurityGroupIds,ParameterValue=${SG_ID} \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
+
+# Read the built AMI id, then pass it to the cluster deploy (step 3) as AmiId:
+AMI_ID=$(aws cloudformation describe-stacks --stack-name pcs-rocky9-ami --region ${REGION} \
+  --query 'Stacks[0].Outputs[?OutputKey==`Rocky9PCSAmiId`].OutputValue' --output text)
+
+#   ...add to the create-stack --parameters in step 3:
+#     ParameterKey=AmiId,ParameterValue=${AMI_ID} \
+#     ParameterKey=SlurmVersion,ParameterValue=25.11 \    # match the AMI's Slurm (Pyxis ABI lock)
+```
+
+> The interactive user on Rocky is **`rocky`** (not `ubuntu`) — `sudo su - rocky` on the
+> login node. Everything else in this guide (queues, SSM access, `sinfo`, jobs) is the same.
+> Match `SlurmVersion` to what the AMI was built for. Full details and caveats:
+> [ROCKY9-AMI.md](./ROCKY9-AMI.md).
+
+### Optional: link an S3 bucket to /fsx
+
+Set `DataRepositoryS3Bucket` to link an existing S3 bucket to the Lustre `/fsx`
+filesystem via a **Data Repository Association (DRA)**. The bucket is mapped 1-1 with
+**`/fsx/s3`**: existing objects appear immediately, new/changed/deleted S3 objects lazy-load
+in, and files you create/change/delete under `/fsx/s3` **auto-export back** to the bucket
+(bidirectional) — handy for staging datasets in and writing results out without a manual
+`aws s3 cp` step.
+
+Add to the step-3 `create-stack` parameters (or `update-stack` an existing cluster —
+the DRA is a separate resource, so enabling it does **not** replace the filesystem):
+
+```bash
+    ParameterKey=DataRepositoryS3Bucket,ParameterValue=my-dataset-bucket \
+    ParameterKey=DataRepositoryS3Path,ParameterValue= \   # optional key prefix; empty = whole bucket
+```
+
+Then on the login node the bucket contents are under `/fsx/s3`:
+
+```bash
+ls /fsx/s3/                                   # existing S3 objects (lazy-loaded)
+echo hi > /fsx/s3/result.txt                  # auto-exports to s3://my-dataset-bucket/result.txt
+```
+
+> **Two hard requirements.** (1) The bucket must be in the **same Region** as the cluster —
+> DRAs are single-Region, so a bucket in another Region cannot be linked. (2)
+> `LustreDeploymentType` must be **`PERSISTENT_2`** (the default) — a template Rule fails the
+> stack at create time otherwise. No bucket policy or extra IAM is needed for a same-account
+> bucket (FSx uses its own service-linked role). Give the **bare bucket name**, not an
+> `s3://` URI. Full parameter reference: [PARAMETERS.md](./PARAMETERS.md).
 
 ## 4. Monitor progress
 
