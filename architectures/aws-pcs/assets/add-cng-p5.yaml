@@ -249,7 +249,7 @@ Parameters:
     Description: >-
       Optional URL of a post-install script to download and run on each node at
       first boot (PCS equivalent of ParallelCluster OnNodeConfigured). Leave
-      empty to skip. To install Enroot/Pyxis, point this at assets/scripts/install-enroot-pyxis.sh.
+      empty or set to the literal 'none' to skip. To install Enroot/Pyxis, point this at assets/scripts/install-enroot-pyxis.sh.
       Accepts an s3:// URL (instance-role fetch; private bucket OK) or an http(s):// URL (curl; public only). For Enroot/Pyxis point at scripts/install-enroot-pyxis.sh in the templates bucket.
     Default: ''
 
@@ -521,11 +521,18 @@ Resources:
             # Post-install script (optional) - generic OnNodeConfigured-style hook.
             # Downloads and runs a user-supplied script (e.g. Enroot/Pyxis install).
             - |
-              if [ -n "${PostInstallScriptUrl}" ]; then
-                echo "Downloading post-install script from ${PostInstallScriptUrl}..." | tee /var/log/pcs-post-install.log
-                case "${PostInstallScriptUrl}" in
-                  s3://*) aws s3 cp "${PostInstallScriptUrl}" /tmp/pcs-post-install.sh >> /var/log/pcs-post-install.log 2>&1 ;;
-                  *)      curl -fsSL "${PostInstallScriptUrl}" -o /tmp/pcs-post-install.sh ;;
+              # Skip when empty OR the literal sentinel "none" (case-insensitive).
+              # NOTE: CloudFormation trims a whitespace-only parameter value to empty,
+              # so a "single space to skip" never reaches here as a space — it arrives
+              # empty and takes the default-installer branch upstream. Use "none" for a
+              # reliable skip that survives CFN trimming.
+              PIS_URL="${PostInstallScriptUrl}"
+              PIS_LC=$(printf '%s' "${!PIS_URL}" | tr '[:upper:]' '[:lower:]')
+              if [ -n "${!PIS_URL}" ] && [ "${!PIS_LC}" != "none" ]; then
+                echo "Downloading post-install script from ${!PIS_URL}..." | tee /var/log/pcs-post-install.log
+                case "${!PIS_URL}" in
+                  s3://*) aws s3 cp "${!PIS_URL}" /tmp/pcs-post-install.sh >> /var/log/pcs-post-install.log 2>&1 ;;
+                  *)      curl -fsSL "${!PIS_URL}" -o /tmp/pcs-post-install.sh ;;
                 esac
                 chmod +x /tmp/pcs-post-install.sh
                 echo "Executing post-install script..." | tee -a /var/log/pcs-post-install.log
@@ -535,7 +542,7 @@ Resources:
                 bash /tmp/pcs-post-install.sh ${PostInstallScriptArgs} >> /var/log/pcs-post-install.log 2>&1
                 echo "Post-install script completed (exit $?)" | tee -a /var/log/pcs-post-install.log
               else
-                echo "No post-install script configured (PostInstallScriptUrl empty)" | tee /var/log/pcs-post-install.log
+                echo "No post-install script configured (PostInstallScriptUrl empty or 'none')" | tee /var/log/pcs-post-install.log
               fi
             # GPU health-check suite (optional). When GpuHealthCheck != none, fetch the
             # suite tarball from the templates bucket and extract to a FIXED path that the

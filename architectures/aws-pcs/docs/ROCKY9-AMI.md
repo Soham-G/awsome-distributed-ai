@@ -87,10 +87,12 @@ echo "$AMI_ID"
 
 ## Step 3: Pass it to the cluster as `AmiId`
 
-Enroot/Pyxis is baked in, so skip the boot-time install with a single space (as with the
-DLAMI path). The boot scripts (`install-enroot-pyxis.sh`, `setup-directory.sh`) auto-detect
-Rocky vs Ubuntu, so leaving `PostInstallScriptUrl` at its default is also safe (idempotent
-no-op on a pre-baked AMI).
+Enroot/Pyxis is baked in, so you can skip the boot-time install by passing
+`PostInstallScriptUrl=none` (as with the DLAMI path). The boot scripts
+(`install-enroot-pyxis.sh`, `setup-directory.sh`) auto-detect Rocky vs Ubuntu, so leaving
+`PostInstallScriptUrl` at its default is also safe (the default installer is an idempotent
+no-op on a pre-baked AMI). Note: a single space does **not** skip — CloudFormation trims a
+whitespace-only value to empty, which runs the default installer.
 
 ```bash
 aws cloudformation create-stack \
@@ -100,7 +102,7 @@ aws cloudformation create-stack \
     ParameterKey=PrimarySubnetAZ,ParameterValue=us-east-2a \
     ParameterKey=AmiId,ParameterValue=$AMI_ID \
     ParameterKey=SlurmVersion,ParameterValue=25.11 \
-    ParameterKey=PostInstallScriptUrl,ParameterValue=' ' \
+    ParameterKey=PostInstallScriptUrl,ParameterValue=none \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --region ${REGION}
 ```
@@ -131,7 +133,7 @@ aws cloudformation create-stack \
     ParameterKey=S3BucketName,ParameterValue=${BUCKET} \
     ParameterKey=AmiId,ParameterValue=<Rocky9PCSAmiId> \
     ParameterKey=SlurmVersion,ParameterValue=25.11 \
-    ParameterKey=PostInstallScriptUrl,ParameterValue=' ' \
+    ParameterKey=PostInstallScriptUrl,ParameterValue=none \
     ParameterKey=GpuUsePlacementGroup,ParameterValue=false \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
 ```

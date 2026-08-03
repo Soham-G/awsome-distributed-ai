@@ -156,7 +156,7 @@ aws cloudformation create-stack \
     ParameterKey=ManagedAccounting,ParameterValue=enabled \
     ParameterKey=DirectoryService,ParameterValue=OpenLDAP-LoginNode \
     ParameterKey=MonitoringStack,ParameterValue=none \
-    ParameterKey=PostInstallScriptUrl,ParameterValue=" " \
+    ParameterKey=PostInstallScriptUrl,ParameterValue=none \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --region ${REGION}
 ```
@@ -188,7 +188,7 @@ Useful parameter notes:
 | `ManagedAccounting` | `enabled` | Turns on Slurm accounting (per-user/job usage, `sacct`/`sreport`). Needs Slurm 24.11+ (the default 25.11 qualifies) |
 | `DirectoryService` | `OpenLDAP-LoginNode` | Multi-user OpenLDAP on the login node + SSSD on compute nodes |
 | `MonitoringStack` | `none` | No Prometheus/Grafana/DCGM. Drop this param (default `Prometheus-LoginNode`) to enable monitoring |
-| `PostInstallScriptUrl` | `" "` (a single space) | Skips the first-boot Enroot/Pyxis install for faster boots during testing. **Leave this param off** (default empty) to auto-install Enroot/Pyxis — needed for containerized jobs (`srun --container-image=...`) |
+| `PostInstallScriptUrl` | `none` | Skips the first-boot Enroot/Pyxis install for faster boots during testing. **Leave this param off** (default empty) to auto-install Enroot/Pyxis — needed for containerized jobs (`srun --container-image=...`). Use the literal `none` to skip; a single space does **not** skip (CloudFormation trims it to empty → default installer) |
 | `AmiId` | *(empty → DLAMI)* | Empty auto-resolves the latest PCS-Ready Ubuntu DLAMI. To run the GPU queues on **Rocky Linux 9** instead, build the Rocky AMI once and pass its `ami-xxx` here — see [Optional: Rocky Linux 9 AMI](#optional-run-on-rocky-linux-9) below |
 | `DataRepositoryS3Bucket` | *(empty → no link)* | (Optional) Link an existing S3 bucket to the Lustre `/fsx` filesystem — its contents appear under `/fsx/s3` and changes sync back (bidirectional). See [Optional: link an S3 bucket to /fsx](#optional-link-an-s3-bucket-to-fsx) below |
 
@@ -327,7 +327,7 @@ aws ssm start-session --target $LOGIN_ID --region ${REGION}
 ```
 
 Then `sudo su - ubuntu` and check the queue / run a quick GPU job. (This deploy
-disabled the Enroot/Pyxis install via `PostInstallScriptUrl=" "`, so the
+disabled the Enroot/Pyxis install via `PostInstallScriptUrl=none`, so the
 **container** workflow below is not yet available — these checks run directly on
 the PCS-Ready DLAMI, which already has the NVIDIA driver, CUDA, and EFA stack.)
 

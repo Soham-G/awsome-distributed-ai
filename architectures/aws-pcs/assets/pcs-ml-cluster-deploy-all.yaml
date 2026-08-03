@@ -524,9 +524,12 @@ Parameters:
       instance role — works with a private bucket) or an http(s):// URL (fetched
       with curl — public only). Leave EMPTY (default) to auto-install Enroot/Pyxis
       from the templates bucket (s3://<S3BucketName>/<S3KeyPrefix>scripts/install-enroot-pyxis.sh),
-      so it works in dev accounts without public S3. Set to your own s3://or
-      https:// script for custom first-boot setup, or to a single space to skip.
-      Idempotent: a no-op if Enroot/Pyxis is already pre-baked into AmiId.
+      so it works in dev accounts without public S3. Set to your own s3:// or
+      https:// script for custom first-boot setup, or to the literal 'none' to skip
+      the hook entirely. (Do NOT use a single space to skip — CloudFormation trims a
+      whitespace-only value to empty, which selects the DEFAULT installer, not a skip.)
+      The default installer is idempotent: a no-op if Enroot/Pyxis is already pre-baked
+      into AmiId, so leaving it empty is safe even on a pre-baked AMI.
     Default: ''
 
   PostInstallScriptArgs:
@@ -1113,7 +1116,9 @@ Conditions:
   # When PostInstallScriptUrl is left empty, default it to the Enroot/Pyxis
   # installer in the templates bucket (s3://, fetched via the instance role —
   # works with a private bucket). A non-empty value (s3:// or https://) is used
-  # verbatim; a single space disables the post-install hook.
+  # verbatim; the literal 'none' disables the hook (handled in the CNG UserData).
+  # NOTE: a whitespace-only value does NOT skip — CloudFormation trims it to empty,
+  # which lands here as the default (installer) branch. Use 'none' to skip.
   PostInstallScriptUrlIsDefault: !Equals [!Ref PostInstallScriptUrl, '']
   DeployOnDemandCNGEnabled: !Equals [!Ref DeployOnDemandCNG, 'true']
   DirectoryEnabled: !Not [!Equals [!Ref DirectoryService, 'none']]

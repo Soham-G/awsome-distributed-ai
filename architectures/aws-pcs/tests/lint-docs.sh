@@ -47,13 +47,29 @@ for entry in "${BANNED[@]}"; do
   fi
 done
 
-# 2. PostInstallScriptUrl: docs must not say empty = skip (empty now = auto-install;
-#    a single space is the skip sentinel). The literal `PostInstallScriptUrl=""`
-#    (empty string) shown as a skip is the wrong pattern; the correct "single
-#    space to skip" wording is fine.
+# 2. PostInstallScriptUrl skip sentinel. Two wrong patterns to catch:
+#    (a) empty string shown as skip — empty now AUTO-INSTALLS from the templates bucket;
+#    (b) a whitespace-only value ("single space") shown as skip — CloudFormation TRIMS a
+#        whitespace-only param to empty, so it never skips; it takes the default-installer
+#        branch. The correct skip sentinel is the literal `none`.
 hits=$(grep -rnE 'PostInstallScriptUrl=""' "${DOC_GLOBS[@]}" 2>/dev/null || true)
 if [ -n "$hits" ]; then
-  report 'PostInstallScriptUrl="" (empty) shown as skip — empty now auto-installs; use a single space to skip:'
+  report 'PostInstallScriptUrl="" (empty) shown as skip — empty auto-installs; use the literal `none` to skip:'
+  echo "$hits" | sed 's/^/    /'
+fi
+# Flag a whitespace-only ParameterValue (CFN trims it → never skips). Only the literal
+# value form is a hard error; explanatory prose that says "a single space does NOT skip"
+# is allowed (it's the correction we want to keep).
+hits=$(grep -rnE "ParameterValue=(\" \"|' ')" "${DOC_GLOBS[@]}" 2>/dev/null || true)
+if [ -n "$hits" ]; then
+  report "whitespace-only ParameterValue shown — CloudFormation trims it to empty (never a skip). Use the literal 'none':"
+  echo "$hits" | sed 's/^/    /'
+fi
+# Flag prose that PRESCRIBES a single space to skip (but allow the negated correction).
+hits=$(grep -rniE "single space" "${DOC_GLOBS[@]}" 2>/dev/null \
+       | grep -ivE "not[^.]*skip|does \*\*not\*\*|never skip|do not use a single space|does not skip" || true)
+if [ -n "$hits" ]; then
+  report "docs prescribe a single space to skip — CFN trims whitespace-only to empty (runs the default installer). Use the literal 'none' to skip:"
   echo "$hits" | sed 's/^/    /'
 fi
 
