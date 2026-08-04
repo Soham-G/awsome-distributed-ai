@@ -155,6 +155,8 @@ AZ=$(az_name use2-az1)            # primary — g7 + g7e capacity
 AZ2=$(az_name use2-az2)           # g7e + g6e capacity
 AZ3=$(az_name use2-az3)           # g6e capacity
 SSH_CIDR=203.0.113.4/32           # <-- your IP/CIDR for SSH to the login node
+FSX_S3_BUCKET=my-dataset-bucket   # <-- S3 bucket to link to /fsx/s3 (MUST be in $REGION);
+                                  #     leave empty ("") for a plain scratch /fsx (no S3 link)
 
 # Resolve the latest official Rocky 9 base AMI for this Region (owner 792107900819 is
 # Rocky's official account; the ID is Region-specific, so this picks the right one):
@@ -179,9 +181,16 @@ aws cloudformation create-stack \
     ParameterKey=DirectoryService,ParameterValue=OpenLDAP-LoginNode \
     ParameterKey=MonitoringStack,ParameterValue=none \
     ParameterKey=PostInstallScriptUrl,ParameterValue=none \
+    ParameterKey=DataRepositoryS3Bucket,ParameterValue=${FSX_S3_BUCKET} \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --region ${REGION}
 ```
+
+> **`/fsx` ↔ S3 link.** With `FSX_S3_BUCKET` set above, the deploy links that bucket to the
+> Lustre filesystem: its objects appear under **`/fsx/s3`** and files written there
+> auto-export back (bidirectional). The bucket **must be in `$REGION`** (DRAs are single-Region)
+> — set `FSX_S3_BUCKET=""` to skip the link and get a plain scratch `/fsx`. Details:
+> [linking an S3 bucket to /fsx](#linking-an-s3-bucket-to-fsx-datarepositorys3bucket) below.
 
 This one stack **builds the Rocky 9 GPU AMI and then deploys the cluster on it.** Expect
 ~75–90 min the first time (~45–60 min AMI build, then ~25–30 min cluster). The AMI id is on
@@ -227,7 +236,7 @@ Useful parameter notes:
 | `BaseAmiId` | *(from the lookup)* | Base Rocky 9 AMI the in-stack build starts from. **Required when building** (no `AmiId` given); ignored when reusing an `AmiId`. Resolve with the `describe-images` one-liner in Step 3 |
 | `AmiId` | *(empty → build Rocky)* | Empty (default) builds the Rocky 9 GPU AMI in-stack from `BaseAmiId`, then deploys on it. Set to a Rocky PCS AMI you built earlier to **skip the build** (~25–30 min deploy) — then `BaseAmiId` is ignored |
 | `SemanticVersion` | `1.3.0` | Image Builder recipe version for the in-stack build. **Bump on every rebuild** against edited templates (a reused version reuses the cached build). Ignored when reusing an `AmiId` |
-| `DataRepositoryS3Bucket` | *(empty → no link)* | (Optional) Link an existing S3 bucket to the Lustre `/fsx` filesystem — its contents appear under `/fsx/s3` and changes sync back (bidirectional). See [Optional: link an S3 bucket to /fsx](#optional-link-an-s3-bucket-to-fsx) below |
+| `DataRepositoryS3Bucket` | `${FSX_S3_BUCKET}` | Links this S3 bucket to the Lustre `/fsx` filesystem — its contents appear under `/fsx/s3` and changes sync back (bidirectional). Set in Step 3; **must be same-Region**. Empty = plain scratch `/fsx` (no link). See [linking an S3 bucket to /fsx](#linking-an-s3-bucket-to-fsx-datarepositorys3bucket) below |
 
 > **Slurm accounting + multi-user.** `ManagedAccounting=enabled` pairs naturally with
 > `DirectoryService=OpenLDAP-LoginNode` so usage is attributed per real user. To enforce
@@ -303,36 +312,33 @@ Either way the result is identical (same GPU queues, EFA wiring, per-AZ layout).
 **Ubuntu DLAMI**? Deploy [`pcs-ml-cluster-deploy-all.yaml`](../assets/pcs-ml-cluster-deploy-all.yaml)
 directly (leave `AmiId` empty to auto-resolve it) with the same queue parameters.
 
-### Optional: link an S3 bucket to /fsx
+### Linking an S3 bucket to /fsx (`DataRepositoryS3Bucket`)
 
-Set `DataRepositoryS3Bucket` to link an existing S3 bucket to the Lustre `/fsx`
-filesystem via a **Data Repository Association (DRA)**. The bucket is mapped 1-1 with
-**`/fsx/s3`**: existing objects appear immediately, new/changed/deleted S3 objects lazy-load
-in, and files you create/change/delete under `/fsx/s3` **auto-export back** to the bucket
-(bidirectional) — handy for staging datasets in and writing results out without a manual
-`aws s3 cp` step.
+Step 3 sets `DataRepositoryS3Bucket` (via `FSX_S3_BUCKET`), which links that bucket to the
+Lustre `/fsx` filesystem as a **Data Repository Association (DRA)**. The bucket is mapped 1-1
+with **`/fsx/s3`**: existing objects appear immediately, new/changed/deleted S3 objects
+lazy-load in, and files you create/change/delete under `/fsx/s3` **auto-export back** to the
+bucket (bidirectional) — so you stage datasets in and write results out with no manual
+`aws s3 cp` step. Set `FSX_S3_BUCKET=""` to skip the link and get a plain scratch `/fsx`.
 
-Add to the step-3 `create-stack` parameters (or `update-stack` an existing cluster —
-the DRA is a separate resource, so enabling it does **not** replace the filesystem):
-
-```bash
-    ParameterKey=DataRepositoryS3Bucket,ParameterValue=my-dataset-bucket \
-    ParameterKey=DataRepositoryS3Path,ParameterValue= \   # optional key prefix; empty = whole bucket
-```
-
-Then on the login node the bucket contents are under `/fsx/s3`:
+Verify on the login node after the deploy:
 
 ```bash
 ls /fsx/s3/                                   # existing S3 objects (lazy-loaded)
-echo hi > /fsx/s3/result.txt                  # auto-exports to s3://my-dataset-bucket/result.txt
+echo hi > /fsx/s3/result.txt                  # auto-exports to s3://$FSX_S3_BUCKET/result.txt
 ```
 
+To link only part of a bucket, also pass `DataRepositoryS3Path` (a key prefix, e.g.
+`ParameterKey=DataRepositoryS3Path,ParameterValue=datasets/`; empty = the whole bucket). You
+can also enable/disable the link on an already-deployed cluster with `update-stack` — the DRA
+is a separate resource, so toggling it does **not** replace the filesystem.
+
 > **Two hard requirements.** (1) The bucket must be in the **same Region** as the cluster —
-> DRAs are single-Region, so a bucket in another Region cannot be linked. (2)
-> `LustreDeploymentType` must be **`PERSISTENT_2`** (the default) — a template Rule fails the
-> stack at create time otherwise. No bucket policy or extra IAM is needed for a same-account
-> bucket (FSx uses its own service-linked role). Give the **bare bucket name**, not an
-> `s3://` URI. Full parameter reference: [PARAMETERS.md](./PARAMETERS.md).
+> DRAs are single-Region, so a bucket in another Region cannot be linked (the deploy would
+> fail). (2) `LustreDeploymentType` must be **`PERSISTENT_2`** (the default) — a template Rule
+> fails the stack at create time otherwise. No bucket policy or extra IAM is needed for a
+> same-account bucket (FSx uses its own service-linked role). Give the **bare bucket name**,
+> not an `s3://` URI. Full parameter reference: [PARAMETERS.md](./PARAMETERS.md).
 
 ## 4. Monitor progress
 
