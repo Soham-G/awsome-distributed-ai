@@ -1,0 +1,972 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  ONE-STACK Rocky Linux 9 PCS GPU cluster. Builds a PCS-Ready Rocky 9 GPU AMI with
+  EC2 Image Builder AND deploys the full PCS ML cluster (VPC, FSx, PCS scheduler,
+  login + g7/g7e/g6e GPU node groups) on that AMI -- all from a single template, no
+  separate AMI-build stack to run first. If you already have a Rocky 9 PCS AMI, pass
+  it as AmiId and the build is skipped (a fast ~25-30 min cluster-only deploy);
+  leave AmiId empty to build one in-stack first (~75-90 min total). This wrapper only
+  adds the build-orchestration on top of pcs-ml-cluster-deploy-all.yaml -- every
+  cluster knob (queues, monitoring, multi-user, FSx S3 link, etc.) is a passthrough
+  parameter, so anything the standard guide documents works here unchanged.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "1. Rocky 9 AMI (built in-stack unless AmiId is set)"
+        Parameters:
+          - AmiId
+          - BaseAmiId
+          - SlurmVersion
+          - SemanticVersion
+          - SELinuxMode
+      - Label:
+          default: "2. Where the templates live (your staged bucket)"
+        Parameters:
+          - S3BucketName
+          - S3KeyPrefix
+      - Label:
+          default: "3. Cluster placement"
+        Parameters:
+          - PrimarySubnetAZ
+          - AdditionalSubnetAZ2
+          - AdditionalSubnetAZ3
+      - Label:
+          default: "4. Common cluster options (passthrough to the standard template)"
+        Parameters:
+          - GpuUsePlacementGroup
+          - SSHAccessCidr
+          - MonitoringStack
+          - DirectoryService
+          - ManagedAccounting
+          - DataRepositoryS3Bucket
+          - LoginNodeInstanceType
+          - PostInstallScriptUrl
+    ParameterLabels:
+      AmiId:
+        default: "Existing Rocky 9 PCS AMI (empty = build one in-stack)"
+      BaseAmiId:
+        default: "Base Rocky 9 AMI to build FROM (required only when building)"
+      SlurmVersion:
+        default: "Slurm version (AMI + cluster must match)"
+      SemanticVersion:
+        default: "Image Builder recipe version (bump on every rebuild)"
+      SELinuxMode:
+        default: "SELinux mode baked into the AMI"
+
+Parameters:
+  # ---- AMI: build vs reuse -------------------------------------------------
+  AmiId:
+    Type: String
+    Default: ''
+    Description: >-
+      Existing PCS-Ready Rocky 9 GPU AMI to deploy on. Leave EMPTY (default) to
+      BUILD one in-stack from BaseAmiId first (adds ~45-60 min), then deploy on it.
+      Set to an ami-xxxx you built earlier to SKIP the build and deploy straight away
+      (~25-30 min). Reusing a prior build is the fast path for a second cluster.
+    AllowedPattern: '^$|^ami-[0-9a-f]{8,17}$'
+    ConstraintDescription: Must be empty or a valid AMI ID (ami-xxxxxxxxxxxxxxxxx)
+
+  BaseAmiId:
+    Type: String
+    Default: ''
+    Description: >-
+      Base official Rocky Linux 9 AMI to build the PCS AMI FROM. REQUIRED when AmiId
+      is empty (building); IGNORED when AmiId is set (reusing). Resolve the latest for
+      your Region with (owner 792107900819 is Rocky's official account):
+      aws ec2 describe-images --owners 792107900819
+      --filters "Name=name,Values=Rocky-9-EC2-Base-*x86_64*" "Name=state,Values=available"
+      --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text
+    AllowedPattern: '^$|^ami-[0-9a-f]{8,17}$'
+    ConstraintDescription: Must be empty or a valid AMI ID (ami-xxxxxxxxxxxxxxxxx)
+
+  SlurmVersion:
+    Type: String
+    Default: '25.11'
+    AllowedValues: ['25.05', '25.11']
+    Description: >-
+      Slurm version. The built AMI's Pyxis is ABI-locked to this, so the AMI and the
+      cluster MUST match -- this one parameter drives both (passed to the builder and
+      to the cluster), which is why the all-in-one flow can't get them out of sync.
+
+  SemanticVersion:
+    Type: String
+    Default: '1.3.0'
+    AllowedPattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    Description: >-
+      Image Builder recipe/component version for the AMI build. BUMP THIS on every
+      rebuild against an edited template -- reusing a version makes Image Builder reuse
+      the cached component build and your changes silently don't take effect. Ignored
+      when AmiId is set (no build).
+
+  SELinuxMode:
+    Type: String
+    Default: permissive
+    AllowedValues: [permissive, enforcing]
+    Description: >-
+      SELinux mode baked into the built AMI. 'permissive' (default) works reliably out
+      of the gate and logs would-be denials; 'enforcing' is a hardening follow-up.
+      Ignored when AmiId is set.
+
+  # ---- Template hosting ----------------------------------------------------
+  S3BucketName:
+    Type: String
+    Default: 'awsome-distributed-ai'
+    Description: >-
+      S3 bucket holding the nested templates (this wrapper fetches the AMI builder and
+      the cluster template from here, and the cluster fetches its own children + boot
+      scripts from here too). Use the bucket you staged assets/ into for unpublished
+      changes; the default is the public production bucket.
+
+  S3KeyPrefix:
+    Type: String
+    Default: 'templates/'
+    Description: S3 key prefix for the nested templates (keep the trailing slash).
+
+  # ---- Cluster placement ---------------------------------------------------
+  PrimarySubnetAZ:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: >-
+      Availability Zone for the cluster (login node + primary GPU/CPU queues). Pick an
+      AZ where your GPU family has capacity (see the g7/g7e/g6e guide).
+
+  AdditionalSubnetAZ2:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) 2nd AZ name for the -az2 GPU queues (g7e-az2, g6e-az2). Empty = those
+      queues self-skip and you get a single-AZ cluster.
+
+  AdditionalSubnetAZ3:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) 3rd AZ name for the -az3 GPU queues (g6e-az3). Empty = those queues
+      self-skip.
+
+  # ---- Common cluster options (surfaced; everything else keeps its default) --
+  GpuUsePlacementGroup:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >-
+      Cluster placement group for the GPU queues. 'false' (default here) relaxes
+      placement so EC2 can find capacity for scarce GPU types; 'true' co-locates for
+      lowest latency (best for multi-node tightly-coupled jobs).
+
+  SSHAccessCidr:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) CIDR allowed to SSH to the login node (e.g. 203.0.113.4/32). Empty
+      (default) = SSM-only access (no public SSH). SSM works either way.
+
+  MonitoringStack:
+    Type: String
+    Default: 'Prometheus-LoginNode'
+    AllowedValues: ['Prometheus-LoginNode', 'none']
+    Description: >-
+      Prometheus + Grafana + DCGM on the login node ('Prometheus-LoginNode', default),
+      or 'none'. NOTE on Rocky the upstream monitoring installer currently assumes an
+      'ec2-user'; set 'none' if Grafana fails to come up on the Rocky login node.
+
+  DirectoryService:
+    Type: String
+    Default: 'none'
+    AllowedValues: ['none', 'OpenLDAP-LoginNode']
+    Description: >-
+      Multi-user directory. 'none' (default) = single interactive user; on Rocky that
+      user is 'rocky'. 'OpenLDAP-LoginNode' runs slapd on the login node + SSSD on
+      compute nodes.
+
+  ManagedAccounting:
+    Type: String
+    Default: 'disabled'
+    AllowedValues: ['enabled', 'disabled']
+    Description: Slurm accounting (per-user/job usage, sacct/sreport). Needs Slurm 24.11+.
+
+  DataRepositoryS3Bucket:
+    Type: String
+    Default: ''
+    Description: >-
+      (Optional) Link an existing SAME-REGION S3 bucket to the Lustre /fsx filesystem
+      (contents appear under /fsx/s3, bidirectional). Empty (default) = no link.
+    AllowedPattern: '^$|^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be empty or a valid S3 bucket name (3-63 chars, lowercase).
+
+  LoginNodeInstanceType:
+    Type: String
+    Default: 'm6i.4xlarge'
+    Description: Login node instance type.
+
+  PostInstallScriptUrl:
+    Type: String
+    Default: ''
+    Description: >-
+      First-boot hook. EMPTY (default) auto-installs Enroot/Pyxis (on by default so
+      containers work out of the box; a no-op if already baked into the AMI). Set to
+      the literal 'none' to skip, or to your own s3://|https:// script. A single space
+      does NOT skip (CloudFormation trims it to empty).
+
+  # ---- Passthrough to pcs-ml-cluster-deploy-all.yaml -----------------------
+  # Every remaining deploy-all parameter, forwarded verbatim (same names, types,
+  # and defaults) so the standard g7/g7e/g6e guide's full parameter table and
+  # queue-toggle examples work unchanged through this wrapper. Kept in sync with
+  # pcs-ml-cluster-deploy-all.yaml.
+  CreateS3Endpoint:
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Default: 'true'
+    Description: Set to false to avoid creating an S3 endpoint on your VPC.
+    Type: String
+
+  # FSx Storage Configuration
+  Capacity:
+    Description: Storage capacity in GiB (1200 or increments of 2400)
+    Type: Number
+    Default: 1200
+  LustreDeploymentType:
+    Description: >-
+      FSx for Lustre deployment type. PERSISTENT_2 (default) supports throughput
+      per TiB of 125/250/500/1000 but is not in every Region; PERSISTENT_1
+      (50/100/200) is available in more Regions. Pick one your Region supports.
+    Type: String
+    Default: PERSISTENT_2
+    AllowedValues:
+      - PERSISTENT_2
+      - PERSISTENT_1
+  PerUnitStorageThroughput:
+    Description: >-
+      Lustre throughput (MB/s/TiB). Valid values depend on LustreDeploymentType
+      (enforced by a template Rule): PERSISTENT_2 = 125/250/500/1000;
+      PERSISTENT_1 = 50/100/200.
+    Type: String
+    Default: "250"
+    AllowedValues: ["50", "100", "200", "125", "250", "500", "1000"]
+  Compression:
+    Description: Data compression type
+    Type: String
+    AllowedValues:
+      - "LZ4"
+      - "NONE"
+    Default: "LZ4"
+  LustreVersion:
+    Description: Lustre software version
+    Type: String
+    AllowedValues:
+      - "2.15"
+      - "2.12"
+    Default: "2.15"
+  FSxLustreEnableEfa:
+    Description: >-
+      (Optional) Enable EFA on the FSx for Lustre filesystem. Default false.
+      PERSISTENT_2 SSD only -- combining with PERSISTENT_1 fails the stack at
+      create time via a Rule (rather than silently ignoring the opt-in). The
+      headline feature is GPUDirect Storage (GDS) for P5/P5e/P5en/P6-B200 GPU
+      clients, which DMAs file data straight into GPU memory (the NVIDIA
+      nvidia-fs/cuFile stack must be installed on the client -- currently a
+      ROADMAP follow-up). EFA-capable CPU CNGs (OnDemandEfaInterfaceCount > 0) get
+      the EFA transport path to storage as a secondary benefit, useful when a
+      single client is pushing past ~10 GBps. **EFA-enabled Lustre has a
+      much higher minimum Capacity than non-EFA**: at PerUnitStorageThroughput=250
+      the minimum is 19200 GiB (16x the non-EFA default of 1200 GiB). Set
+      Capacity to >= the EFA minimum when enabling this; the full minimum-capacity
+      matrix per throughput tier is in the FSx for Lustre User Guide.
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  DataRepositoryS3Path:
+    Description: >-
+      (Optional) Key prefix within DataRepositoryS3Bucket to link (e.g. "data/").
+      Empty (default) links the whole bucket. Ignored when DataRepositoryS3Bucket
+      is empty. Just the key prefix — no bucket name or s3:// scheme.
+    Type: String
+    Default: ''
+
+  # Multi-user directory
+  DirectoryDomainSuffix:
+    Type: String
+    Description: >-
+      LDAP domain suffix (e.g. dc=cluster,dc=internal). Only used when
+      DirectoryService != none.
+    Default: 'dc=cluster,dc=internal'
+  HomeCapacity:
+    Description: "Home directories storage capacity in GiB"
+    Type: Number
+    Default: 512
+  HomeThroughput:
+    Description: >-
+      OpenZFS /home throughput (MB/s). Valid values depend on
+      OpenZFSDeploymentType (enforced by a template Rule):
+      SINGLE_AZ_HA_2 / SINGLE_AZ_2 = 160/320/640/1280/2560/3840/5120/7680/10240;
+      SINGLE_AZ_HA_1 / SINGLE_AZ_1 = 64/128/256/512/1024/2048/3072/4096.
+    Type: String
+    Default: "320"
+    AllowedValues:
+      ["64", "128", "256", "512", "1024", "2048", "3072", "4096",
+       "160", "320", "640", "1280", "2560", "3840", "5120", "7680", "10240"]
+  OpenZFSDeploymentType:
+    Description: >-
+      FSx for OpenZFS deployment type for /home. SINGLE_AZ_HA_2 (default) is not
+      in every Region; SINGLE_AZ_1 is available in all Regions. Pick one your
+      Region supports (MULTI_AZ excluded — needs a second subnet).
+    Type: String
+    Default: SINGLE_AZ_HA_2
+    AllowedValues:
+      - SINGLE_AZ_HA_2
+      - SINGLE_AZ_HA_1
+      - SINGLE_AZ_2
+      - SINGLE_AZ_1
+
+  # AMI selection (used by every node group)
+  PostInstallScriptArgs:
+    Type: String
+    Description: Space-separated arguments passed to the post-install script.
+    Default: ''
+
+  # PCS Cluster Configuration
+  AccountingPolicyEnforcement:
+    Description: Specify which Slurm accounting policies to enforce
+    Type: String
+    Default: none
+    AllowedValues:
+      - none
+      - 'associations,limits,safe'
+  GpuHealthCheck:
+    Type: String
+    Description: >-
+      Enable the GPU health-check Slurm prolog. 'prolog' sets a cluster-wide Slurm
+      Prolog that runs fast GPU/EFA checks (nvidia-smi + EFA enumeration, ~8s) before
+      each job and drains the node + requeues the job on failure. The prolog is
+      GPU-aware (no-ops on CPU/login nodes), and the health-check suite is installed on
+      the GPU compute node group at first boot. 'none' (default) disables it.
+    Default: 'none'
+    AllowedValues:
+      - 'none'
+      - 'prolog'
+  GrafanaAccessCidr:
+    Type: String
+    Description: >-
+      (Optional) CIDR allowed to reach the login node on HTTPS/443 (Grafana).
+      Empty (default) = SSM port-forward only. When set, also exposes the
+      unauthenticated /prometheus/, /pushgateway/, /slurmexporter/ proxy paths.
+      Use the tightest CIDR you can; clear it when done.
+    Default: ""
+    AllowedPattern: '^$|^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)/(3[0-2]|[12]?\d)$'
+    ConstraintDescription: Must be empty or a valid IPv4 CIDR (e.g. 203.0.113.4/32)
+  MonitoringVersion:
+    Type: String
+    Description: >-
+      aws-parallelcluster-monitoring git ref to install (release tag, branch, or
+      'latest'). Passed down to the CNG stacks, which fetch post-install.sh from
+      MonitoringRepo at this ref and pass it as the ref argument. Pin to a release
+      tag in production; a branch name + MonitoringRepo fork can be used to test
+      unreleased changes.
+    Default: 'v2.9.1'
+  MonitoringRepo:
+    Type: String
+    Description: >-
+      GitHub "owner/repo" to fetch the monitoring stack from. Override with a fork
+      together with a branch in MonitoringVersion to test unreleased changes.
+    Default: 'aws-samples/aws-parallelcluster-monitoring'
+  DcgmExporterImage:
+    Type: String
+    Description: >-
+      dcgm-exporter image for GPU nodes. Default = DCGM 4.5.2 by digest, covering
+      H100/B200/B300 (digest pull bypasses the Docker 29.x OCI-index failure on
+      newer NVCR tags). Override to pin a different build (also use a digest).
+      No effect on CPU nodes.
+    Default: 'nvcr.io/nvidia/k8s/dcgm-exporter@sha256:a7ad6547d4546eaf4dd5d6b4c0b4db4101e63ef7dc3cdff7f42b767d2c60b706'
+
+  # On-Demand Compute Node Group
+  DeployOnDemandCNG:
+    Type: String
+    Description: >-
+      Deploy the on-demand CPU compute node group. Default 'false': AWS PCS caps a
+      cluster at 10 compute node groups (non-adjustable), and the login node group plus
+      the default GPU queues already reach that cap, so the CPU queue is off by default.
+      Enable it only if you also disable a GPU queue to stay within 10 node groups.
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  OnDemandCngName:
+    Type: String
+    Description: Name for on-demand compute node group
+    Default: "cpu1"
+  OnDemandQueueName:
+    Type: String
+    Description: Queue name for on-demand compute node group
+    Default: "cpu1"
+  OnDemandInstanceType:
+    Type: String
+    Description: Instance type for on-demand compute node group
+    Default: "c6i.4xlarge"
+  OnDemandMaxCount:
+    Type: Number
+    Description: Maximum number of instances for on-demand compute node group
+    Default: 4
+    MinValue: 0
+  OnDemandMinCount:
+    Type: Number
+    Description: Minimum number of instances for on-demand compute node group (must be 0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # EFA on the on-demand CPU CNG (for HPC instances like hpc8a/hpc7a/hpc6a).
+  # GPU CNGs (P5/P6) have their own multi-NIC EFA wiring in the dedicated
+  # add-cng-p5/p6-* templates; this knob does NOT affect those.
+  OnDemandEfaInterfaceCount:
+    Type: Number
+    Description: >-
+      Number of Elastic Fabric Adapter (EFA) interfaces on the on-demand (CPU)
+      compute node group. 0 (default) = no EFA (standard ENA networking). 1 or 2
+      = enable EFA with that many interfaces (switches to a NetworkInterfaces
+      LaunchTemplate + a cluster placement group). Set the count to the instance
+      type's MaximumEfaInterfaces: hpc8a.96xlarge / hpc7a.* / hpc6id.32xlarge = 2;
+      hpc6a.48xlarge / c7i.metal = 1. EFA requires an EFA-capable type — a non-EFA
+      type (e.g. the default c6i.4xlarge) fails to launch with count > 0. No
+      effect on the P-series GPU CNG.
+    Default: 0
+    AllowedValues: [0, 1, 2, 4]
+  OnDemandPlacementGroupName:
+    Type: String
+    Description: >-
+      (Optional, advanced) Existing cluster placement group name to launch the
+      on-demand CPU nodes into. Leave empty (default) to auto-create a per-CNG
+      cluster placement group when OnDemandEfaInterfaceCount > 0. Set to share one
+      PG across multiple CNGs (e.g. heterogeneous tightly-coupled jobs). Ignored
+      when OnDemandEfaInterfaceCount = 0.
+    Default: ''
+
+  # P-series Compute Node Group
+  DeployPseriesCNG:
+    Type: String
+    Description: Deploy P-series (P5/P6) compute node group
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  PseriesCngName:
+    Type: String
+    Description: Name for P-series compute node group
+    Default: "gpu-p5"
+  PseriesQueueName:
+    Type: String
+    Description: Queue name for P-series compute node group
+    Default: "gpu-p5"
+  PseriesInstanceType:
+    Type: String
+    Description: >-
+      Instance type for the P-series compute node group. The right multi-NIC EFA
+      template AND interface count are selected automatically from this value:
+      p5* use add-cng-p5.yaml (p5/p5e = 32 NICs, p5en = 16), p6-b200.48xlarge uses
+      add-cng-p6-b200.yaml (8 NICs), p6-b300.48xlarge uses add-cng-p6-b300.yaml (17 NICs).
+      For g7e, use the dedicated g7e queues in section 4b instead.
+    Default: "p5.48xlarge"
+    AllowedValues:
+      - p5.48xlarge
+      - p5e.48xlarge
+      - p5en.48xlarge
+      - p6-b200.48xlarge
+      - p6-b300.48xlarge
+  PseriesMaxCount:
+    Type: Number
+    Description: Maximum number of instances for P-series compute node group
+    Default: 4
+    MinValue: 0
+  PseriesMinCount:
+    Type: Number
+    Description: Minimum number of instances for P-series compute node group (must be 0 for testing without Capacity Reservation)
+    Default: 0
+    MinValue: 0
+  CapacityReservationId:
+    Type: String
+    Default: ""
+    Description: >-
+      (Optional) **Capacity Block for ML reservation ID** for the GPU node group.
+      When SET, GPU nodes launch with MarketType=capacity-block against this
+      reservation. Leave EMPTY for On-Demand. This parameter is for Capacity
+      Blocks ONLY -- do NOT put an On-Demand Capacity Reservation (ODCR) ID here;
+      an "open" ODCR is consumed automatically by On-Demand launches, so for ODCR
+      leave this empty.
+
+  # ---------------------------------------------------------------------------
+  # GPU queues (sections 4b-4e). Ten independent, separately-toggleable On-Demand
+  # queues across three families, each placed in the AZ where that family has the
+  # best capacity. Each queue is single-AZ (multi-NIC EFA pins the subnet per NIC,
+  # so a queue cannot span AZs while keeping EFA). Every full = 48xlarge, half =
+  # 24xlarge. Independent of DeployPseriesCNG (P5/P6) above.
+  #   g7  full/half            -> primary AZ            (add-cng-g7.yaml / add-cng-g7-24xl.yaml)
+  #   g7e full/half            -> primary AZ            (add-cng-g7e.yaml / add-cng-g7e-24xl.yaml)
+  #   g7e full/half (-az2)     -> AdditionalSubnetAZ2   (same g7e templates)
+  #   g6e full/half (-az2)     -> AdditionalSubnetAZ2   (add-cng-g6e.yaml / add-cng-g6e-24xl.yaml)
+  #   g6e full/half (-az3)     -> AdditionalSubnetAZ3   (same g6e templates)
+  # All default 'true'; MinCount stays 0 so nodes launch only when a job is
+  # submitted. The AZ2/AZ3 queues additionally require their AdditionalSubnetAZ*
+  # to be set (they self-skip otherwise — see Conditions).
+  # ---------------------------------------------------------------------------
+
+  # --- g7 full (48xlarge, 2-NIC EFA) primary AZ ---
+  DeployG7Full:
+    Type: String
+    Description: Deploy the g7.48xlarge (full, 8-GPU) On-Demand queue in the primary AZ
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7FullName:
+    Type: String
+    Description: Node group + queue name for the g7 full queue
+    Default: "gpu-g7-full"
+  G7FullMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7 full queue
+    Default: 2
+    MinValue: 0
+  G7FullMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7 full queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7 half (24xlarge, 1-NIC EFA) primary AZ ---
+  DeployG7Half:
+    Type: String
+    Description: >-
+      Deploy the g7.24xlarge (half, 4-GPU) On-Demand queue in the primary AZ. Default
+      'false': PCS caps a cluster at 10 compute node groups (non-adjustable), and login
+      + the other 9 GPU queues reach that cap, so this queue is off by default (g7-full
+      still covers the g7 family in the primary AZ). Enable it only if you disable
+      another queue to stay within 10 node groups.
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7HalfName:
+    Type: String
+    Description: Node group + queue name for the g7 half queue
+    Default: "gpu-g7-half"
+  G7HalfMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7 half queue
+    Default: 2
+    MinValue: 0
+  G7HalfMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7 half queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e full (48xlarge, 4-NIC EFA) primary AZ ---
+  DeployG7eFull:
+    Type: String
+    Description: Deploy the g7e.48xlarge (full, 8-GPU) On-Demand queue in the primary AZ
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7eFullName:
+    Type: String
+    Description: Node group + queue name for the g7e full queue
+    Default: "gpu-g7e-full"
+  G7eFullMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e full queue
+    Default: 2
+    MinValue: 0
+  G7eFullMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e full queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e half (24xlarge, 2-NIC EFA) primary AZ ---
+  DeployG7eHalf:
+    Type: String
+    Description: Deploy the g7e.24xlarge (half, 4-GPU) On-Demand queue in the primary AZ
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7eHalfName:
+    Type: String
+    Description: Node group + queue name for the g7e half queue
+    Default: "gpu-g7e-half"
+  G7eHalfMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e half queue
+    Default: 2
+    MinValue: 0
+  G7eHalfMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e half queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e full (48xlarge, 4-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG7eFullAz2:
+    Type: String
+    Description: Deploy the g7e.48xlarge (full, 8-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7eFullAz2Name:
+    Type: String
+    Description: Node group + queue name for the g7e full AZ2 queue
+    Default: "gpu-g7e-full-az2"
+  G7eFullAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e full AZ2 queue
+    Default: 2
+    MinValue: 0
+  G7eFullAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e full AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g7e half (24xlarge, 2-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG7eHalfAz2:
+    Type: String
+    Description: Deploy the g7e.24xlarge (half, 4-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G7eHalfAz2Name:
+    Type: String
+    Description: Node group + queue name for the g7e half AZ2 queue
+    Default: "gpu-g7e-half-az2"
+  G7eHalfAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e half AZ2 queue
+    Default: 2
+    MinValue: 0
+  G7eHalfAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e half AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e full (48xlarge, 4-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG6eFullAz2:
+    Type: String
+    Description: Deploy the g6e.48xlarge (full, 8-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eFullAz2Name:
+    Type: String
+    Description: Node group + queue name for the g6e full AZ2 queue
+    Default: "gpu-g6e-full-az2"
+  G6eFullAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e full AZ2 queue
+    Default: 2
+    MinValue: 0
+  G6eFullAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e full AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e half (24xlarge, 2-NIC EFA) AZ2 (requires AdditionalSubnetAZ2) ---
+  DeployG6eHalfAz2:
+    Type: String
+    Description: Deploy the g6e.24xlarge (half, 4-GPU) On-Demand queue in AZ2 (requires AdditionalSubnetAZ2)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eHalfAz2Name:
+    Type: String
+    Description: Node group + queue name for the g6e half AZ2 queue
+    Default: "gpu-g6e-half-az2"
+  G6eHalfAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e half AZ2 queue
+    Default: 2
+    MinValue: 0
+  G6eHalfAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e half AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e full (48xlarge, 4-NIC EFA) AZ3 (requires AdditionalSubnetAZ3) ---
+  DeployG6eFullAz3:
+    Type: String
+    Description: Deploy the g6e.48xlarge (full, 8-GPU) On-Demand queue in AZ3 (requires AdditionalSubnetAZ3)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eFullAz3Name:
+    Type: String
+    Description: Node group + queue name for the g6e full AZ3 queue
+    Default: "gpu-g6e-full-az3"
+  G6eFullAz3MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e full AZ3 queue
+    Default: 2
+    MinValue: 0
+  G6eFullAz3MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e full AZ3 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- g6e half (24xlarge, 2-NIC EFA) AZ3 (requires AdditionalSubnetAZ3) ---
+  DeployG6eHalfAz3:
+    Type: String
+    Description: Deploy the g6e.24xlarge (half, 4-GPU) On-Demand queue in AZ3 (requires AdditionalSubnetAZ3)
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  G6eHalfAz3Name:
+    Type: String
+    Description: Node group + queue name for the g6e half AZ3 queue
+    Default: "gpu-g6e-half-az3"
+  G6eHalfAz3MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e half AZ3 queue
+    Default: 2
+    MinValue: 0
+  G6eHalfAz3MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e half AZ3 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  # --- shared GPU knob (applies to every On-Demand GPU queue above) ---
+  RootVolumeSize:
+    Type: Number
+    Description: >-
+      Root EBS volume size (GiB) for all node groups. The PCS-Ready DLAMI default
+      (~75 GiB) is too small for pulling/importing large container images; 300
+      GiB gives ample headroom. Passed down to every compute node group stack.
+    Default: 300
+    MinValue: 75
+
+# FSx throughput is a discrete grid that depends on the chosen deployment type.
+# These Rules reject an invalid (DeploymentType, throughput) pair at stack-create
+# time with a clear message, instead of letting it fail deep inside the nested
+# prerequisites stack as an opaque CreateFileSystem error.
+
+Conditions:
+  # Build the AMI only when the user did not supply one.
+  BuildAmi: !Equals [!Ref AmiId, '']
+
+Resources:
+  #############################################################################
+  # Build VPC (build path only). The cluster's own VPC is created LATER inside
+  # ClusterStack (it depends on the AMI id), so at build time there is no cluster
+  # subnet to use -- and most accounts here have no default VPC. This minimal,
+  # self-contained VPC (one public subnet + IGW) gives the Image Builder instance
+  # the internet egress it needs. It exists ONLY on the build path and is torn
+  # down with the stack; the cluster does NOT use it.
+  #############################################################################
+  BuildVPC:
+    Type: AWS::EC2::VPC
+    Condition: BuildAmi
+    Properties:
+      CidrBlock: 10.222.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ami-build-vpc'
+
+  BuildIGW:
+    Type: AWS::EC2::InternetGateway
+    Condition: BuildAmi
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ami-build-igw'
+
+  BuildIGWAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: BuildAmi
+    Properties:
+      VpcId: !Ref BuildVPC
+      InternetGatewayId: !Ref BuildIGW
+
+  BuildSubnet:
+    Type: AWS::EC2::Subnet
+    Condition: BuildAmi
+    Properties:
+      VpcId: !Ref BuildVPC
+      CidrBlock: 10.222.0.0/24
+      AvailabilityZone: !Ref PrimarySubnetAZ
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ami-build-subnet'
+
+  BuildRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: BuildAmi
+    Properties:
+      VpcId: !Ref BuildVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ami-build-rt'
+
+  BuildDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: BuildAmi
+    DependsOn: BuildIGWAttach
+    Properties:
+      RouteTableId: !Ref BuildRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref BuildIGW
+
+  BuildSubnetRTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: BuildAmi
+    Properties:
+      SubnetId: !Ref BuildSubnet
+      RouteTableId: !Ref BuildRouteTable
+
+  BuildSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: BuildAmi
+    Properties:
+      GroupDescription: !Sub 'Egress for the ${AWS::StackName} Rocky 9 AMI build instance'
+      VpcId: !Ref BuildVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (443 to aws-pcs-repo/EFA/NVIDIA/Rocky/GitHub + SSM)
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ami-build-sg'
+
+  #############################################################################
+  # Stage 1 (build path only): build the PCS-Ready Rocky 9 GPU AMI. CloudFormation
+  # blocks on this ~45-60 min Image Builder run before creating the cluster, then
+  # feeds its output AMI id into ClusterStack below.
+  #############################################################################
+  Rocky9AmiStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: BuildAmi
+    Properties:
+      TemplateURL: !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}pcs-ready-rocky9-gpu.yaml'
+      Parameters:
+        BaseAmiId: !Ref BaseAmiId
+        SlurmVersion: !Ref SlurmVersion
+        SemanticVersion: !Ref SemanticVersion
+        SELinuxMode: !Ref SELinuxMode
+        SubnetId: !Ref BuildSubnet
+        SecurityGroupIds: !Ref BuildSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Rocky9Ami'
+
+  #############################################################################
+  # Stage 2: the full PCS cluster, on the built (or supplied) AMI. This is the
+  # SAME pcs-ml-cluster-deploy-all.yaml the standard guides use -- every parameter
+  # here is a straight passthrough, so anything those guides document applies.
+  #############################################################################
+  ClusterStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}pcs-ml-cluster-deploy-all.yaml'
+      Parameters:
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+        # AmiId = the one you supplied, or the one we just built.
+        AmiId: !If
+          - BuildAmi
+          - !GetAtt Rocky9AmiStack.Outputs.Rocky9PCSAmiId
+          - !Ref AmiId
+        SlurmVersion: !Ref SlurmVersion
+        PrimarySubnetAZ: !Ref PrimarySubnetAZ
+        AdditionalSubnetAZ2: !Ref AdditionalSubnetAZ2
+        AdditionalSubnetAZ3: !Ref AdditionalSubnetAZ3
+        GpuUsePlacementGroup: !Ref GpuUsePlacementGroup
+        SSHAccessCidr: !Ref SSHAccessCidr
+        MonitoringStack: !Ref MonitoringStack
+        DirectoryService: !Ref DirectoryService
+        ManagedAccounting: !Ref ManagedAccounting
+        DataRepositoryS3Bucket: !Ref DataRepositoryS3Bucket
+        LoginNodeInstanceType: !Ref LoginNodeInstanceType
+        PostInstallScriptUrl: !Ref PostInstallScriptUrl
+        CreateS3Endpoint: !Ref CreateS3Endpoint
+        Capacity: !Ref Capacity
+        LustreDeploymentType: !Ref LustreDeploymentType
+        PerUnitStorageThroughput: !Ref PerUnitStorageThroughput
+        Compression: !Ref Compression
+        LustreVersion: !Ref LustreVersion
+        FSxLustreEnableEfa: !Ref FSxLustreEnableEfa
+        DataRepositoryS3Path: !Ref DataRepositoryS3Path
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        HomeCapacity: !Ref HomeCapacity
+        HomeThroughput: !Ref HomeThroughput
+        OpenZFSDeploymentType: !Ref OpenZFSDeploymentType
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        AccountingPolicyEnforcement: !Ref AccountingPolicyEnforcement
+        GpuHealthCheck: !Ref GpuHealthCheck
+        GrafanaAccessCidr: !Ref GrafanaAccessCidr
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        DeployOnDemandCNG: !Ref DeployOnDemandCNG
+        OnDemandCngName: !Ref OnDemandCngName
+        OnDemandQueueName: !Ref OnDemandQueueName
+        OnDemandInstanceType: !Ref OnDemandInstanceType
+        OnDemandMaxCount: !Ref OnDemandMaxCount
+        OnDemandMinCount: !Ref OnDemandMinCount
+        OnDemandEfaInterfaceCount: !Ref OnDemandEfaInterfaceCount
+        OnDemandPlacementGroupName: !Ref OnDemandPlacementGroupName
+        DeployPseriesCNG: !Ref DeployPseriesCNG
+        PseriesCngName: !Ref PseriesCngName
+        PseriesQueueName: !Ref PseriesQueueName
+        PseriesInstanceType: !Ref PseriesInstanceType
+        PseriesMaxCount: !Ref PseriesMaxCount
+        PseriesMinCount: !Ref PseriesMinCount
+        CapacityReservationId: !Ref CapacityReservationId
+        DeployG7Full: !Ref DeployG7Full
+        G7FullName: !Ref G7FullName
+        G7FullMaxCount: !Ref G7FullMaxCount
+        G7FullMinCount: !Ref G7FullMinCount
+        DeployG7Half: !Ref DeployG7Half
+        G7HalfName: !Ref G7HalfName
+        G7HalfMaxCount: !Ref G7HalfMaxCount
+        G7HalfMinCount: !Ref G7HalfMinCount
+        DeployG7eFull: !Ref DeployG7eFull
+        G7eFullName: !Ref G7eFullName
+        G7eFullMaxCount: !Ref G7eFullMaxCount
+        G7eFullMinCount: !Ref G7eFullMinCount
+        DeployG7eHalf: !Ref DeployG7eHalf
+        G7eHalfName: !Ref G7eHalfName
+        G7eHalfMaxCount: !Ref G7eHalfMaxCount
+        G7eHalfMinCount: !Ref G7eHalfMinCount
+        DeployG7eFullAz2: !Ref DeployG7eFullAz2
+        G7eFullAz2Name: !Ref G7eFullAz2Name
+        G7eFullAz2MaxCount: !Ref G7eFullAz2MaxCount
+        G7eFullAz2MinCount: !Ref G7eFullAz2MinCount
+        DeployG7eHalfAz2: !Ref DeployG7eHalfAz2
+        G7eHalfAz2Name: !Ref G7eHalfAz2Name
+        G7eHalfAz2MaxCount: !Ref G7eHalfAz2MaxCount
+        G7eHalfAz2MinCount: !Ref G7eHalfAz2MinCount
+        DeployG6eFullAz2: !Ref DeployG6eFullAz2
+        G6eFullAz2Name: !Ref G6eFullAz2Name
+        G6eFullAz2MaxCount: !Ref G6eFullAz2MaxCount
+        G6eFullAz2MinCount: !Ref G6eFullAz2MinCount
+        DeployG6eHalfAz2: !Ref DeployG6eHalfAz2
+        G6eHalfAz2Name: !Ref G6eHalfAz2Name
+        G6eHalfAz2MaxCount: !Ref G6eHalfAz2MaxCount
+        G6eHalfAz2MinCount: !Ref G6eHalfAz2MinCount
+        DeployG6eFullAz3: !Ref DeployG6eFullAz3
+        G6eFullAz3Name: !Ref G6eFullAz3Name
+        G6eFullAz3MaxCount: !Ref G6eFullAz3MaxCount
+        G6eFullAz3MinCount: !Ref G6eFullAz3MinCount
+        DeployG6eHalfAz3: !Ref DeployG6eHalfAz3
+        G6eHalfAz3Name: !Ref G6eHalfAz3Name
+        G6eHalfAz3MaxCount: !Ref G6eHalfAz3MaxCount
+        G6eHalfAz3MinCount: !Ref G6eHalfAz3MinCount
+        RootVolumeSize: !Ref RootVolumeSize
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Cluster'
+
+Outputs:
+  ClusterId:
+    Description: PCS cluster ID
+    Value: !GetAtt ClusterStack.Outputs.ClusterId
+  Rocky9AmiId:
+    Description: The Rocky 9 PCS AMI the cluster is running on (built in-stack, or the one you supplied).
+    Value: !If
+      - BuildAmi
+      - !GetAtt Rocky9AmiStack.Outputs.Rocky9PCSAmiId
+      - !Ref AmiId

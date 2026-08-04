@@ -55,6 +55,16 @@ It reuses the standard cluster: VPC + networking, FSx for Lustre (`/fsx` scratch
 FSx for OpenZFS (`/home`), and the Slurm scheduler. Enroot/Pyxis is installed at
 first boot so containerized jobs work out of the box.
 
+> **This guide deploys on Rocky Linux 9** as a single stack: one template
+> ([`pcs-rocky9-cluster-all-in-one.yaml`](../assets/pcs-rocky9-cluster-all-in-one.yaml))
+> **builds the PCS-Ready Rocky 9 GPU AMI and stands up the whole cluster on it** — no
+> separate AMI-build stack to run first. The first deploy builds the AMI (~45–60 min) then
+> the cluster (~25–30 min); pass an `AmiId` you built earlier to skip the build. The
+> interactive user on Rocky is **`rocky`** (not `ubuntu`). Prefer the AWS-published Ubuntu
+> DLAMI instead? Use [`pcs-ml-cluster-deploy-all.yaml`](../assets/pcs-ml-cluster-deploy-all.yaml)
+> directly with the same parameters (see the [main README](../README.md)) — every queue knob
+> below is identical.
+
 ## 1. Prerequisites
 
 - AWS CLI configured (`aws sts get-caller-identity`) with permissions to create
@@ -94,11 +104,17 @@ first boot so containerized jobs work out of the box.
 - An S3 bucket you own. Nested stacks are fetched by URL, so the templates must be
   staged in S3 (you can't deploy the parent with a local `--template-body` and have
   it find the child templates). The bucket can be private.
+- **A base Rocky 9 AMI** for the in-stack AMI build (only when you're *building*, i.e. not
+  reusing an `AmiId`). Rocky publishes official images per Region under AWS account
+  `792107900819`; resolve the latest with the one-liner in Step 3. The build also runs
+  `dnf -y update`, so the published base is fine; for maximum reliability re-image a
+  `dnf`-updated + rebooted copy first (see [ROCKY9-AMI.md](./ROCKY9-AMI.md)).
 
 ## 2. Stage the templates
 
 Run from the repo's `architectures/aws-pcs` directory so `assets/` is the source.
-This uploads every template (including the g7/g7e/g6e CNG templates) and the boot scripts:
+This uploads every template — the all-in-one wrapper, the Rocky 9 AMI builder, the cluster
+template, the g7/g7e/g6e CNG templates — and the boot scripts:
 
 ```bash
 cd architectures/aws-pcs
@@ -140,10 +156,17 @@ AZ2=$(az_name use2-az2)           # g7e + g6e capacity
 AZ3=$(az_name use2-az3)           # g6e capacity
 SSH_CIDR=203.0.113.4/32           # <-- your IP/CIDR for SSH to the login node
 
+# Resolve the latest official Rocky 9 base AMI for this Region (owner 792107900819 is
+# Rocky's official account; the ID is Region-specific, so this picks the right one):
+BASE_AMI=$(aws ec2 describe-images --region "$REGION" --owners 792107900819 \
+  --filters "Name=name,Values=Rocky-9-EC2-Base-*x86_64*" "Name=state,Values=available" \
+  --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+
 aws cloudformation create-stack \
   --stack-name pcs-gpu \
-  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ml-cluster-deploy-all.yaml" \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-rocky9-cluster-all-in-one.yaml" \
   --parameters \
+    ParameterKey=BaseAmiId,ParameterValue=${BASE_AMI} \
     ParameterKey=PrimarySubnetAZ,ParameterValue=${AZ} \
     ParameterKey=AdditionalSubnetAZ2,ParameterValue=${AZ2} \
     ParameterKey=AdditionalSubnetAZ3,ParameterValue=${AZ3} \
@@ -151,15 +174,27 @@ aws cloudformation create-stack \
     ParameterKey=S3KeyPrefix,ParameterValue=${PREFIX} \
     ParameterKey=GpuUsePlacementGroup,ParameterValue=false \
     ParameterKey=LoginNodeInstanceType,ParameterValue=c7i.xlarge \
-    ParameterKey=OnDemandInstanceType,ParameterValue=c7i.4xlarge \
     ParameterKey=SSHAccessCidr,ParameterValue=${SSH_CIDR} \
     ParameterKey=ManagedAccounting,ParameterValue=enabled \
     ParameterKey=DirectoryService,ParameterValue=OpenLDAP-LoginNode \
     ParameterKey=MonitoringStack,ParameterValue=none \
     ParameterKey=PostInstallScriptUrl,ParameterValue=none \
-  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
   --region ${REGION}
 ```
+
+This one stack **builds the Rocky 9 GPU AMI and then deploys the cluster on it.** Expect
+~75–90 min the first time (~45–60 min AMI build, then ~25–30 min cluster). The AMI id is on
+the stack's `Rocky9AmiId` output.
+
+> **Fast path — reuse an AMI.** Once you've built the Rocky AMI once (this stack, or the
+> standalone [ROCKY9-AMI.md](./ROCKY9-AMI.md) builder), pass it as `AmiId` to **skip the build**
+> and deploy in ~25–30 min. Add `ParameterKey=AmiId,ParameterValue=ami-xxxx` (then `BaseAmiId`
+> is ignored — leave it off). Grab a prior build's id from its stack:
+> `aws cloudformation describe-stacks --stack-name pcs-gpu --region $REGION --query 'Stacks[0].Outputs[?OutputKey==\`Rocky9AmiId\`].OutputValue' --output text`.
+
+> `CAPABILITY_AUTO_EXPAND` is required here because the deploy nests templates two levels
+> deep (all-in-one → cluster → CNGs).
 
 This brings up the nine default-on GPU Slurm partitions (all listed above except
 `gpu-g7-half`, which defaults off to respect the 10-node-group cap — see the note above).
@@ -189,7 +224,9 @@ Useful parameter notes:
 | `DirectoryService` | `OpenLDAP-LoginNode` | Multi-user OpenLDAP on the login node + SSSD on compute nodes |
 | `MonitoringStack` | `none` | No Prometheus/Grafana/DCGM. Drop this param (default `Prometheus-LoginNode`) to enable monitoring |
 | `PostInstallScriptUrl` | `none` | Skips the first-boot Enroot/Pyxis install for faster boots during testing. **Leave this param off** (default empty) to auto-install Enroot/Pyxis — needed for containerized jobs (`srun --container-image=...`). Use the literal `none` to skip; a single space does **not** skip (CloudFormation trims it to empty → default installer) |
-| `AmiId` | *(empty → DLAMI)* | Empty auto-resolves the latest PCS-Ready Ubuntu DLAMI. To run the GPU queues on **Rocky Linux 9** instead, build the Rocky AMI once and pass its `ami-xxx` here — see [Optional: Rocky Linux 9 AMI](#optional-run-on-rocky-linux-9) below |
+| `BaseAmiId` | *(from the lookup)* | Base Rocky 9 AMI the in-stack build starts from. **Required when building** (no `AmiId` given); ignored when reusing an `AmiId`. Resolve with the `describe-images` one-liner in Step 3 |
+| `AmiId` | *(empty → build Rocky)* | Empty (default) builds the Rocky 9 GPU AMI in-stack from `BaseAmiId`, then deploys on it. Set to a Rocky PCS AMI you built earlier to **skip the build** (~25–30 min deploy) — then `BaseAmiId` is ignored |
+| `SemanticVersion` | `1.3.0` | Image Builder recipe version for the in-stack build. **Bump on every rebuild** against edited templates (a reused version reuses the cached build). Ignored when reusing an `AmiId` |
 | `DataRepositoryS3Bucket` | *(empty → no link)* | (Optional) Link an existing S3 bucket to the Lustre `/fsx` filesystem — its contents appear under `/fsx/s3` and changes sync back (bidirectional). See [Optional: link an S3 bucket to /fsx](#optional-link-an-s3-bucket-to-fsx) below |
 
 > **Slurm accounting + multi-user.** `ManagedAccounting=enabled` pairs naturally with
@@ -216,7 +253,7 @@ else with `UsePreviousValue=true`:
 
 ```bash
 aws cloudformation update-stack --stack-name pcs-gpu --region ${REGION} \
-  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ml-cluster-deploy-all.yaml" \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-rocky9-cluster-all-in-one.yaml" \
   --parameters \
     ParameterKey=DeployG6eHalfAz3,ParameterValue=true \
     ParameterKey=G6eHalfAz3MaxCount,ParameterValue=2 \
@@ -224,48 +261,47 @@ aws cloudformation update-stack --stack-name pcs-gpu --region ${REGION} \
         --query "Stacks[0].Parameters[].ParameterKey" --output text \
       | tr '\t' '\n' | grep -vx -e DeployG6eHalfAz3 -e G6eHalfAz3MaxCount \
       | sed 's/.*/ParameterKey=&,UsePreviousValue=true/') \
-  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
+  --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND --region ${REGION}
 ```
+
+> The queue toggles (`DeployG7*` / `G7*MaxCount` / …) are passthrough parameters on the
+> all-in-one template, so this works unchanged. `UsePreviousValue=true` carries `AmiId`
+> forward, so a queue change **does not rebuild the AMI** — it reuses the one already built.
 
 The shell snippet carries every other existing parameter forward unchanged; you only
 spell out the ones you're changing. (Match `--stack-name` to your deployed stack.)
 
-### Optional: run on Rocky Linux 9
+### Advanced: build the AMI as a separate stack (build once, reuse many)
 
-By default every node group (login + g7/g7e/g6e) boots the AWS-published **PCS-Ready
-Ubuntu 24.04 DLAMI**. To run the GPU queues on **Rocky Linux 9** instead, build a
-PCS-Ready Rocky 9 GPU AMI once (a separate one-time stack, ~45–60 min) and pass its
-`ami-xxx` as `AmiId`. The GPU queues, EFA wiring, and per-AZ layout are all identical —
-only the OS image changes; the boot scripts auto-detect Rocky vs Ubuntu.
+Step 3 builds the Rocky AMI *inside* the cluster stack, which is simplest for a one-shot
+deploy. If you'll stand up **several** clusters, or want the AMI to outlive any single
+cluster, build it once with the standalone [ROCKY9-AMI.md](./ROCKY9-AMI.md) stack and then pass
+that `ami-xxx` as `AmiId` — every deploy after the first skips the ~45–60 min build:
 
 ```bash
-# One-time: build the Rocky 9 GPU AMI (see docs/ROCKY9-AMI.md for the full walkthrough).
-# BASE_AMI = a kernel-updated official Rocky 9 cloud AMI; SubnetId/SecurityGroupIds are
-# required in accounts with no default VPC.
-aws cloudformation create-stack \
-  --stack-name pcs-rocky9-ami \
+# 1. Build once (separate stack). Full walkthrough — base-AMI lookup + build subnet/SG —
+#    is in docs/ROCKY9-AMI.md.
+aws cloudformation create-stack --stack-name pcs-rocky9-ami --region ${REGION} \
   --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ready-rocky9-gpu.yaml" \
-  --parameters \
-    ParameterKey=BaseAmiId,ParameterValue=${BASE_AMI} \
-    ParameterKey=SlurmVersion,ParameterValue=25.11 \
-    ParameterKey=SemanticVersion,ParameterValue=1.3.0 \
-    ParameterKey=SubnetId,ParameterValue=${SUBNET_ID} \
-    ParameterKey=SecurityGroupIds,ParameterValue=${SG_ID} \
+  --parameters ParameterKey=BaseAmiId,ParameterValue=${BASE_AMI} \
+               ParameterKey=SlurmVersion,ParameterValue=25.11 \
+               ParameterKey=SemanticVersion,ParameterValue=1.3.0 \
+               ParameterKey=SubnetId,ParameterValue=${SUBNET_ID} \
+               ParameterKey=SecurityGroupIds,ParameterValue=${SG_ID} \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
 
-# Read the built AMI id, then pass it to the cluster deploy (step 3) as AmiId:
 AMI_ID=$(aws cloudformation describe-stacks --stack-name pcs-rocky9-ami --region ${REGION} \
   --query 'Stacks[0].Outputs[?OutputKey==`Rocky9PCSAmiId`].OutputValue' --output text)
 
-#   ...add to the create-stack --parameters in step 3:
-#     ParameterKey=AmiId,ParameterValue=${AMI_ID} \
-#     ParameterKey=SlurmVersion,ParameterValue=25.11 \    # match the AMI's Slurm (Pyxis ABI lock)
+# 2. Deploy the cluster on it — same Step 3 command, but pass AmiId (build is skipped;
+#    BaseAmiId is then ignored, so you can drop it):
+#      ParameterKey=AmiId,ParameterValue=${AMI_ID} \
 ```
 
-> The interactive user on Rocky is **`rocky`** (not `ubuntu`) — `sudo su - rocky` on the
-> login node. Everything else in this guide (queues, SSM access, `sinfo`, jobs) is the same.
-> Match `SlurmVersion` to what the AMI was built for. Full details and caveats:
-> [ROCKY9-AMI.md](./ROCKY9-AMI.md).
+Either way the result is identical (same GPU queues, EFA wiring, per-AZ layout). Match
+`SlurmVersion` to what the AMI was built for (the Pyxis ABI lock). Prefer the AWS-published
+**Ubuntu DLAMI**? Deploy [`pcs-ml-cluster-deploy-all.yaml`](../assets/pcs-ml-cluster-deploy-all.yaml)
+directly (leave `AmiId` empty to auto-resolve it) with the same queue parameters.
 
 ### Optional: link an S3 bucket to /fsx
 
@@ -326,10 +362,11 @@ LOGIN_ID=$(aws ec2 describe-instances --region ${REGION} \
 aws ssm start-session --target $LOGIN_ID --region ${REGION}
 ```
 
-Then `sudo su - ubuntu` and check the queue / run a quick GPU job. (This deploy
-disabled the Enroot/Pyxis install via `PostInstallScriptUrl=none`, so the
-**container** workflow below is not yet available — these checks run directly on
-the PCS-Ready DLAMI, which already has the NVIDIA driver, CUDA, and EFA stack.)
+Then `sudo su - rocky` (the interactive user on Rocky 9; it's `ubuntu` on the DLAMI path)
+and check the queue / run a quick GPU job. (This deploy disabled the Enroot/Pyxis install via
+`PostInstallScriptUrl=none`, so the **container** workflow below is not yet available — these
+checks run directly on the Rocky 9 GPU AMI, which already has the NVIDIA driver, CUDA, and EFA
+stack baked in.)
 
 ```bash
 sinfo   # lists the nine default GPU partitions you deployed (gpu-g7-full, gpu-g7e-full-az2, gpu-g6e-half-az3, ...; gpu-g7-half only if you enabled it)
