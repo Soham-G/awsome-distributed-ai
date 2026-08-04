@@ -34,12 +34,18 @@ installers, in this order (EC2 Image Builder reboots between kmod layers):
 
 ## Prerequisites
 
-- **A kernel-updated Rocky 9 base AMI.** Start from an official Rocky Linux 9 cloud AMI
-  ([rockylinux.org/cloud-images](https://rockylinux.org/cloud-images/)), launch it, run
-  `sudo dnf -y update`, reboot, and create an image — then use *that* AMI as `BaseAmiId`.
-  AWS warns that PCS custom-AMI builds can fail if the base kernel is stale (the driver/EFA/
-  Lustre kmods must match the running kernel). The build also runs `dnf -y update` as a
-  safety net, but starting kernel-current avoids most kmod-vs-kernel failures.
+- **A Rocky 9 base AMI** (`BaseAmiId`). Rocky publishes official cloud images per Region under
+  AWS account **`792107900819`** — resolve the latest for your Region with the query in Step 1
+  (no Marketplace subscription needed). **Kernel currency matters:** PCS custom-AMI builds can
+  fail on a stale base kernel (the NVIDIA/EFA/Lustre kmods must match the running kernel). The
+  published base is often a point release behind; the build runs `dnf -y update` as a safety net
+  (this is what produced the working AMIs), but for maximum reliability launch the base,
+  `sudo dnf -y update`, reboot, re-image, and pass *that* AMI as `BaseAmiId` instead.
+- **A build subnet + security group** (`SubnetId` / `SecurityGroupIds`). Leave both empty to use
+  the account's **default VPC**. Accounts with **no default VPC** must pass a subnet — Image
+  Builder's `LaunchBuildInstance` step fails to place the build instance otherwise. Use a subnet
+  with outbound internet on 443 (public with an IGW route, or private + NAT) and a security group
+  that allows egress to `0.0.0.0/0:443`. Step 1 shows how to find one.
 - Permissions to create EC2 Image Builder, IAM, and EC2 resources.
 - Build-instance egress on 443 to: the regional `aws-pcs-repo` bucket, `efa-installer.amazonaws.com`,
   NVIDIA's `developer.download.nvidia.com` + `nvidia.github.io`, the FSx Lustre client repo,
@@ -47,19 +53,73 @@ installers, in this order (EC2 Image Builder reboots between kmod layers):
 
 ## Step 1: Build the AMI (~45–60 min one-time, separate stack)
 
+First stage the template in an S3 bucket you control (the same bucket you'll deploy the
+cluster from), then resolve the base AMI and the build network, then launch the build.
+
 ```bash
 REGION=us-east-2
-BASE_AMI=ami-xxxxxxxxxxxxxxxxx   # your kernel-updated Rocky 9 AMI
+BUCKET=my-pcs-templates       # an S3 bucket you control (can be private)
+PREFIX=templates/             # key prefix (keep the trailing slash)
 
+# Stage the builder template (and the rest of assets/) to your bucket:
+#   run from the repo's architectures/aws-pcs directory
+aws s3 sync assets/ "s3://${BUCKET}/${PREFIX}" --exclude "*" --include "*.yaml" --include "*.sh"
+```
+
+**Resolve the latest official Rocky 9 base AMI for this Region** (owner `792107900819` is
+Rocky's official AWS account; AMI IDs are Region-specific, so this auto-picks the right one):
+
+```bash
+BASE_AMI=$(aws ec2 describe-images --region "$REGION" \
+  --owners 792107900819 \
+  --filters "Name=name,Values=Rocky-9-EC2-Base-*x86_64*" \
+            "Name=state,Values=available" "Name=architecture,Values=x86_64" \
+  --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
+echo "BASE_AMI=$BASE_AMI"
+```
+
+**Pick the build subnet + security group.** In an account with a default VPC you can skip this
+and leave both parameters empty. With **no default VPC**, resolve a subnet that has outbound
+internet on 443 (public + IGW route, or private + NAT) and a security group in the same VPC that
+allows egress on 443:
+
+```bash
+# A public subnet (auto-assigns a public IP → simplest egress path):
+SUBNET_ID=$(aws ec2 describe-subnets --region "$REGION" \
+  --filters "Name=map-public-ip-on-launch,Values=true" \
+  --query 'Subnets[0].SubnetId' --output text)
+
+# The default security group of that subnet's VPC (its default allow-all egress is sufficient):
+VPC_ID=$(aws ec2 describe-subnets --region "$REGION" --subnet-ids "$SUBNET_ID" \
+  --query 'Subnets[0].VpcId' --output text)
+SG_ID=$(aws ec2 describe-security-groups --region "$REGION" \
+  --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=default" \
+  --query 'SecurityGroups[0].GroupId' --output text)
+echo "SUBNET_ID=$SUBNET_ID  SG_ID=$SG_ID  (VPC $VPC_ID)"
+```
+
+> Sanity-check the subnet actually reaches the internet before a ~45-min build: a **public**
+> subnet needs `map-public-ip-on-launch=true` **and** a `0.0.0.0/0` route to an IGW; a **private**
+> subnet needs a `0.0.0.0/0` route to a NAT gateway. The command above picks a public one.
+
+**Launch the build** (omit the `SubnetId` / `SecurityGroupIds` lines to use the default VPC):
+
+```bash
 aws cloudformation create-stack \
   --stack-name pcs-rocky9 \
-  --template-url https://<your-bucket>.s3.amazonaws.com/templates/pcs-ready-rocky9-gpu.yaml \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ready-rocky9-gpu.yaml" \
   --parameters \
     ParameterKey=BaseAmiId,ParameterValue=${BASE_AMI} \
     ParameterKey=SlurmVersion,ParameterValue=25.11 \
+    ParameterKey=SemanticVersion,ParameterValue=1.3.0 \
+    ParameterKey=SubnetId,ParameterValue=${SUBNET_ID} \
+    ParameterKey=SecurityGroupIds,ParameterValue=${SG_ID} \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
   --region ${REGION}
 ```
+
+Bump `SemanticVersion` on **every** rebuild — reusing a version makes EC2 Image Builder reuse
+the cached component build, so template edits silently don't take effect.
 
 Like the DLAMI template, the AMI is **single-Slurm-version by design** (Pyxis' SPANK ABI is
 locked to its compile-time Slurm) — pass the same `SlurmVersion` you'll use on the cluster.
@@ -94,12 +154,16 @@ Enroot/Pyxis is baked in, so you can skip the boot-time install by passing
 no-op on a pre-baked AMI). Note: a single space does **not** skip — CloudFormation trims a
 whitespace-only value to empty, which runs the default installer.
 
+Reusing the `REGION` / `BUCKET` / `PREFIX` and `AMI_ID` from Steps 1–2:
+
 ```bash
 aws cloudformation create-stack \
   --stack-name pcs-gpu \
-  --template-url https://<your-bucket>.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ml-cluster-deploy-all.yaml" \
   --parameters \
     ParameterKey=PrimarySubnetAZ,ParameterValue=us-east-2a \
+    ParameterKey=S3BucketName,ParameterValue=${BUCKET} \
+    ParameterKey=S3KeyPrefix,ParameterValue=${PREFIX} \
     ParameterKey=AmiId,ParameterValue=$AMI_ID \
     ParameterKey=SlurmVersion,ParameterValue=25.11 \
     ParameterKey=PostInstallScriptUrl,ParameterValue=none \
@@ -107,7 +171,9 @@ aws cloudformation create-stack \
   --region ${REGION}
 ```
 
-Match `SlurmVersion` to what the AMI was built for (the Pyxis ABI lock).
+Match `SlurmVersion` to what the AMI was built for (the Pyxis ABI lock). Pass `S3BucketName`
+(and `S3KeyPrefix` if you changed it) so the nested stacks and boot scripts are fetched from
+**your** bucket, not the public one.
 
 ## Deploy a full Rocky 9 cluster (verified end-to-end)
 
@@ -116,27 +182,38 @@ validated on a live deploy (us-east-2, Rocky 9.8): all node groups came up **ACT
 the login node registered with SSM. The boot scripts auto-detect Rocky vs Ubuntu, so the
 same `pcs-ml-cluster-deploy-all.yaml` works unchanged.
 
+Reusing `REGION` / `BUCKET` / `PREFIX` / `AMI_ID` from Steps 1–2 (or set them here):
+
 ```bash
 REGION=us-east-2
-BUCKET=<your-templates-bucket>
+BUCKET=my-pcs-templates       # the bucket you staged the templates in (Step 1)
+PREFIX=templates/
+AMI_ID=ami-xxxxxxxxxxxxxxxxx  # the Rocky9PCSAmiId output from Step 2
+
 # AZs by stable ID (portable across accounts) -> names the template needs:
 az() { aws ec2 describe-availability-zones --region "$REGION" \
   --filters "Name=zone-id,Values=$1" --query 'AvailabilityZones[0].ZoneName' --output text; }
 
 aws cloudformation create-stack \
   --stack-name pcs-rocky9-cluster \
-  --template-url "https://${BUCKET}.s3.amazonaws.com/templates/pcs-ml-cluster-deploy-all.yaml" \
+  --template-url "https://${BUCKET}.s3.amazonaws.com/${PREFIX}pcs-ml-cluster-deploy-all.yaml" \
   --parameters \
     ParameterKey=PrimarySubnetAZ,ParameterValue=$(az use2-az1) \
     ParameterKey=AdditionalSubnetAZ2,ParameterValue=$(az use2-az2) \
     ParameterKey=AdditionalSubnetAZ3,ParameterValue=$(az use2-az3) \
     ParameterKey=S3BucketName,ParameterValue=${BUCKET} \
-    ParameterKey=AmiId,ParameterValue=<Rocky9PCSAmiId> \
+    ParameterKey=S3KeyPrefix,ParameterValue=${PREFIX} \
+    ParameterKey=AmiId,ParameterValue=${AMI_ID} \
     ParameterKey=SlurmVersion,ParameterValue=25.11 \
     ParameterKey=PostInstallScriptUrl,ParameterValue=none \
     ParameterKey=GpuUsePlacementGroup,ParameterValue=false \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
 ```
+
+> To also link an S3 bucket to `/fsx` (same-Region bucket, contents appear under `/fsx/s3`,
+> bidirectional), add `ParameterKey=DataRepositoryS3Bucket,ParameterValue=<bucket>` — see
+> [PARAMETERS.md](./PARAMETERS.md) and the g7/g7e/g6e guide's
+> [S3-link section](./G7E-DEPLOY.md#optional-link-an-s3-bucket-to-fsx).
 
 **SSM on Rocky is wired up automatically:** the AMI installs the SSM agent, but EC2 Image
 Builder strips it from the output AMI during its cleanup (Image Builder uses SSM to
