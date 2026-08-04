@@ -352,10 +352,23 @@ Resources:
                       # at the dnf layer, plus a shell-level retry loop, make the build robust.
                       dnf() { command dnf --setopt=retries=10 --setopt=timeout=120 "$@"; }
                       retry() { local n=0; until "$@"; do n=$((n+1)); [ "$n" -ge 4 ] && return 1; echo "retry $n after failure: $*"; sleep 20; done; }
-                      retry dnf -y update
+                      # Drop the base AMI's stale dnf metadata cache before anything. The stock
+                      # Rocky base ships a months-old cache; if BaseOS is stale but AppStream is
+                      # fresh, they desync and `glibc-devel = <ver>` (AppStream) can't find its
+                      # matching `glibc` (BaseOS) -> "nothing provides glibc = 2.34-N.el9_8 needed
+                      # by glibc-devel". clean+makecache forces one consistent repo snapshot.
+                      dnf clean all
+                      retry dnf -y makecache
+                      # `--refresh` re-fetches metadata so BaseOS and AppStream advance together
+                      # (defeats the cross-repo skew above at the source).
+                      retry dnf -y --refresh update
                       # EPEL + build toolchain needed by later NVIDIA/EFA/Slurm layers.
                       retry dnf -y install epel-release || retry dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
-                      retry dnf -y groupinstall "Development Tools"
+                      # `--nobest` is the escape hatch: if a mirror still serves a glibc-devel
+                      # newer than the installed glibc (a transient upstream desync clean+refresh
+                      # can't fix from the client side), let dnf install the matching OLDER devel
+                      # instead of failing the whole build on the version pin.
+                      retry dnf -y --nobest groupinstall "Development Tools"
                       retry dnf -y install dkms wget curl git jq gcc gcc-c++ make
                       # AWS CLI v2. Load-bearing for the boot path, NOT just a build
                       # convenience: the CNG UserData and every first-boot script use `aws`

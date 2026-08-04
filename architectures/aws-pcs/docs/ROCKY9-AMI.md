@@ -257,6 +257,18 @@ see the slurmd `--conf-server` caveat below, now fixed.)
 - **This is a from-scratch build** with many moving version pins (PCS agent, Slurm, NVIDIA,
   EFA, Lustre client). Expect to iterate on component failures the first time — kmod-vs-kernel
   and SELinux are the usual culprits.
+- **`glibc-devel` dependency error on `groupinstall "Development Tools"`** —
+  `nothing provides glibc = 2.34-N.el9_8 needed by glibc-devel-...from appstream`. This is a
+  **BaseOS/AppStream metadata skew**, not a broken group: `glibc` lives in BaseOS and
+  `glibc-devel` in AppStream, and the devel pins the exact glibc version-release. When the
+  base AMI's stale dnf cache leaves BaseOS behind while AppStream is fresh, the newest
+  `glibc-devel` can't find its matching `glibc` and resolution dead-ends (the retry loop can't
+  help — it's a deterministic resolution failure, not a network flake). The kernel/toolchain
+  component now defends against this with `dnf clean all` + `makecache`, `dnf -y --refresh
+  update` (so both repos advance together), and `--nobest` on the group install (falls back to
+  the older devel that matches the installed glibc). If you hit it on an older AMI or a manual
+  run: `sudo dnf clean all && sudo dnf -y --refresh update && sudo dnf -y --nobest groupinstall
+  "Development Tools"`.
 - **SELinux** defaults to permissive (see above); tightening to enforcing is a deliberate
   follow-up.
 - **Slurm install path:** AWS docs show both `/opt/aws/pcs/scheduler/` (singular) and
