@@ -806,6 +806,31 @@ Parameters:
     Default: 0
     MinValue: 0
 
+  DeployG7eSmallTestAz2:
+    Type: String
+    Description: Deploy the small g7e.2xlarge test queue in AZ2 (requires AdditionalSubnetAZ2) — use when the primary AZ has no g7e capacity
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eSmallTestAz2Name:
+    Type: String
+    Description: Node group + queue name for the g7e small test AZ2 queue
+    Default: "gpu-g7e-test-az2"
+  G7eSmallTestAz2InstanceType:
+    Type: String
+    Description: Small g7e AZ2 test instance type (1 GPU, no EFA)
+    Default: "g7e.2xlarge"
+    AllowedValues: ["g7e.2xlarge", "g7e.4xlarge", "g7e.8xlarge", "g7e.16xlarge"]
+  G7eSmallTestAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e small test AZ2 queue
+    Default: 1
+    MinValue: 0
+  G7eSmallTestAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e small test AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
   # --- shared GPU knob (applies to every On-Demand GPU queue above) ---
   RootVolumeSize:
     Type: Number
@@ -1047,6 +1072,11 @@ Resources:
         G6eSmallTestInstanceType: !Ref G6eSmallTestInstanceType
         G6eSmallTestMaxCount: !Ref G6eSmallTestMaxCount
         G6eSmallTestMinCount: !Ref G6eSmallTestMinCount
+        DeployG7eSmallTestAz2: !Ref DeployG7eSmallTestAz2
+        G7eSmallTestAz2Name: !Ref G7eSmallTestAz2Name
+        G7eSmallTestAz2InstanceType: !Ref G7eSmallTestAz2InstanceType
+        G7eSmallTestAz2MaxCount: !Ref G7eSmallTestAz2MaxCount
+        G7eSmallTestAz2MinCount: !Ref G7eSmallTestAz2MinCount
         RootVolumeSize: !Ref RootVolumeSize
       Tags:
         - Key: Name

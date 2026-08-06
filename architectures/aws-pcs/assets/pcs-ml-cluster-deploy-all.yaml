@@ -113,6 +113,11 @@ Metadata:
           - G6eSmallTestInstanceType
           - G6eSmallTestMinCount
           - G6eSmallTestMaxCount
+          - DeployG7eSmallTestAz2
+          - G7eSmallTestAz2Name
+          - G7eSmallTestAz2InstanceType
+          - G7eSmallTestAz2MinCount
+          - G7eSmallTestAz2MaxCount
       - Label:
           default: "4f. Shared GPU queue setting"
         Parameters:
@@ -1085,6 +1090,38 @@ Parameters:
     Default: 0
     MinValue: 0
 
+  # --- g7e small test queue in AZ2 (requires AdditionalSubnetAZ2) ---
+  # Same single-GPU, no-EFA add-cng.yaml queue as DeployG7eSmallTest, but pinned to
+  # AZ2 — useful when g7e.2xlarge has no capacity (ICE) in the primary AZ. Self-skips
+  # if AdditionalSubnetAZ2 is empty. OFF by default (PCS 10-node-group cap).
+  DeployG7eSmallTestAz2:
+    Type: String
+    Description: >-
+      Deploy a small g7e.2xlarge (1x RTX PRO 6000 Blackwell, no EFA) On-Demand test
+      queue in AZ2 (requires AdditionalSubnetAZ2) for verifying nvidia-smi when the
+      primary AZ has no g7e capacity. OFF by default; needs a free node-group slot.
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eSmallTestAz2Name:
+    Type: String
+    Description: Node group + queue name for the g7e small test AZ2 queue
+    Default: "gpu-g7e-test-az2"
+  G7eSmallTestAz2InstanceType:
+    Type: String
+    Description: Small g7e AZ2 test instance type (1 GPU, no EFA)
+    Default: "g7e.2xlarge"
+    AllowedValues: ["g7e.2xlarge", "g7e.4xlarge", "g7e.8xlarge", "g7e.16xlarge"]
+  G7eSmallTestAz2MaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e small test AZ2 queue
+    Default: 1
+    MinValue: 0
+  G7eSmallTestAz2MinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e small test AZ2 queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
   # --- shared GPU knob (applies to every On-Demand GPU queue above) ---
   GpuUsePlacementGroup:
     Type: String
@@ -1270,6 +1307,10 @@ Conditions:
   # Small single-GPU test queues (primary AZ, no EFA, generic add-cng.yaml).
   DeployG7eSmallTestEnabled: !Equals [!Ref DeployG7eSmallTest, 'true']
   DeployG6eSmallTestEnabled: !Equals [!Ref DeployG6eSmallTest, 'true']
+  # g7e small test queue in AZ2 (needs AdditionalSubnetAZ2 — self-skips otherwise).
+  DeployG7eSmallTestAz2Enabled: !And
+    - !Equals [!Ref DeployG7eSmallTestAz2, 'true']
+    - !Condition HasSubnetAZ2
 
 Resources:
   #############################################################################
@@ -2182,6 +2223,55 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G7eSmallTest'
+
+  # g7e small test queue pinned to AZ2 (for when the primary AZ has no g7e capacity).
+  G7eSmallTestAz2CNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eSmallTestAz2Enabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eSmallTestAz2Name
+        QueueName: !Ref G7eSmallTestAz2Name
+        InstanceType: !Ref G7eSmallTestAz2InstanceType
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eSmallTestAz2MaxCount
+        MinCount: !Ref G7eSmallTestAz2MinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.AdditionalPrivateSubnet2
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        EfaInterfaceCount: 0
+        PlacementGroupName: ''
+        GpuHealthCheck: !Ref GpuHealthCheck
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eSmallTestAz2'
 
   G6eSmallTestCNGStack:
     Type: AWS::CloudFormation::Stack

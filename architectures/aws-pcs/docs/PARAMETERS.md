@@ -173,6 +173,11 @@ half = `add-cng-g6e-24xl.yaml` (2 NIC).
 | `G6eSmallTestInstanceType` | `g6e.2xlarge` | g6e small test instance type (`g6e.2xlarge`/`4xlarge`/`8xlarge`/`16xlarge` — all 1-GPU, no EFA) |
 | `G6eSmallTestMinCount` | `0` | g6e small test minimum nodes (0 = dynamic scaling) |
 | `G6eSmallTestMaxCount` | `1` | g6e small test maximum nodes |
+| `DeployG7eSmallTestAz2` | `false` | Same small single-GPU, no-EFA g7e test queue as `DeployG7eSmallTest` but pinned to **AZ2** (`AdditionalSubnetAZ2`, self-skips if unset). Use when `g7e.2xlarge` hits `InsufficientInstanceCapacity` (ICE) in the primary AZ. **Off by default** (PCS 10-node-group cap — free a slot first) |
+| `G7eSmallTestAz2Name` | `gpu-g7e-test-az2` | g7e small test (AZ2) node-group + Slurm queue name |
+| `G7eSmallTestAz2InstanceType` | `g7e.2xlarge` | g7e small test (AZ2) instance type (`g7e.2xlarge`/`4xlarge`/`8xlarge`/`16xlarge` — all 1-GPU, no EFA) |
+| `G7eSmallTestAz2MinCount` | `0` | g7e small test (AZ2) minimum nodes (0 = dynamic scaling) |
+| `G7eSmallTestAz2MaxCount` | `1` | g7e small test (AZ2) maximum nodes |
 | `GpuUsePlacementGroup` | `true` | Shared across **all** g7/g7e/g6e queues. Launch On-Demand GPU nodes into a cluster placement group (`true`, lowest inter-node latency for tightly-coupled multi-node jobs). Set `false` to relax placement — a cluster placement group forces all nodes into one tight physical group, which can cause `InsufficientInstanceCapacity` for scarce GPU types even when the AZ has capacity; relaxing it improves On-Demand launch success (best for single-node jobs or when you hit ICE) |
 
 > **Note — g7/g7e/g6e and Capacity Blocks.** These families are **not** eligible for
