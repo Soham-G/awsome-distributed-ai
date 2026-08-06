@@ -314,6 +314,18 @@ Parameters:
     Description: S3 key prefix for scripts (e.g. templates/)
     Default: 'templates/'
 
+  ComputeInitScriptsDir:
+    Type: String
+    Description: >-
+      (Optional) Directory scanned at first boot; every regular file in it is run
+      once per node, in sorted (LC_ALL=C) order, as root, with log-and-continue on
+      failure (a failing script is logged but the node still joins). Default
+      '/fsx/s3/compute-init' is a folder under the S3<->Lustre DRA mount, so scripts
+      uploaded to the linked S3 bucket auto-appear on every compute node. Set to
+      'none' to disable (deploy-all passes 'none' for the login node). No-op when the
+      folder is absent (e.g. the S3 DRA is not enabled or nothing was uploaded yet).
+    Default: '/fsx/s3/compute-init'
+
 Conditions:
   # Purchasing mode is driven by PurchaseOption (single source of truth), not by
   # whether CapacityReservationId happens to be set.
@@ -570,6 +582,34 @@ Resources:
             - rm -rf /tmp/home/
             # If provided, mount FSxL filesystem as /fsx
             - if [ ! -z "${FSxLustreFilesystemId}" ]; then mkdir -p /fsx; mount -t lustre -o noatime,flock,lazystatfs ${FSxLustreFilesystemId}.fsx.${AWS::Region}.amazonaws.com@tcp:/${FSxLustreFilesystemMountName} /fsx; chmod 1777 /fsx; fi
+            # Compute-init scripts (optional). Run every regular file in
+            # ComputeInitScriptsDir (default /fsx/s3/compute-init, a folder under the
+            # S3<->Lustre DRA mount) ONCE at first boot, in sorted order, as root. The
+            # customer drops scripts into the linked S3 bucket; the DRA auto-imports
+            # them onto /fsx/s3 so every compute node runs them at launch. Log-and-
+            # continue: a failing script is logged but the node still joins (no drain).
+            # Skipped on 'none'/empty or when the folder is absent, so it is a no-op by
+            # default on clusters without the DRA. deploy-all passes 'none' for login.
+            # Runs AFTER the /fsx mount above so /fsx/s3 is present. This block runs
+            # under /bin/sh (POSIX only here); user scripts are executed with bash.
+            - |
+              CI_DIR="${ComputeInitScriptsDir}"
+              CI_LC=$(printf '%s' "${!CI_DIR}" | tr '[:upper:]' '[:lower:]')
+              CI_LOG=/var/log/pcs-compute-init.log
+              if [ -n "${!CI_DIR}" ] && [ "${!CI_LC}" != "none" ] && [ -d "${!CI_DIR}" ]; then
+                echo "compute-init: running scripts in ${!CI_DIR}" | tee "${!CI_LOG}"
+                export PCS_SLURM_VERSION="${SlurmVersion}"
+                # Regular files only, at the top level, in stable C-locale sort order.
+                for ci_script in $(find "${!CI_DIR}" -maxdepth 1 -type f | LC_ALL=C sort); do
+                  echo "compute-init: executing ${!ci_script}" >> "${!CI_LOG}"
+                  chmod +x "${!ci_script}" 2>/dev/null || true
+                  bash "${!ci_script}" >> "${!CI_LOG}" 2>&1
+                  echo "compute-init: ${!ci_script} exited $?" >> "${!CI_LOG}"
+                done
+                echo "compute-init: done" >> "${!CI_LOG}"
+              else
+                echo "compute-init: nothing to do (dir=${!CI_DIR}, empty/none/absent)" | tee /var/log/pcs-compute-init.log
+              fi
             # Monitoring stack installation (optional, enabled on Login Node only)
             - |
               if [ "${DeployMonitoring}" = "true" ]; then

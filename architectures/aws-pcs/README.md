@@ -67,7 +67,7 @@ aws cloudformation create-stack \
   --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --region ${REGION}
 ```
 
-This brings up (≈25–30 min, mostly VPC/FSx): 1 login node (m6i.4xlarge) with monitoring,
+This brings up (≈25–30 min, mostly VPC/FSx): 1 login node (r7i.2xlarge) with monitoring,
 a `cpu1` queue (c6i.4xlarge, 0–4 nodes, dynamic scaling), and Enroot/Pyxis on every node.
 Add a GPU queue and tune storage/monitoring via the parameters below.
 

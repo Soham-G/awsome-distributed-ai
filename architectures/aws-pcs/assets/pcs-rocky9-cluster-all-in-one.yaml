@@ -21,6 +21,7 @@ Metadata:
           - SlurmVersion
           - SemanticVersion
           - SELinuxMode
+          - NvidiaKernelModuleFlavor
       - Label:
           default: "2. Where the templates live (your staged bucket)"
         Parameters:
@@ -42,6 +43,7 @@ Metadata:
           - ManagedAccounting
           - DataRepositoryS3Bucket
           - LoginNodeInstanceType
+          - ComputeInitScriptsDir
           - PostInstallScriptUrl
     ParameterLabels:
       AmiId:
@@ -54,6 +56,8 @@ Metadata:
         default: "Image Builder recipe version (bump on every rebuild)"
       SELinuxMode:
         default: "SELinux mode baked into the AMI"
+      NvidiaKernelModuleFlavor:
+        default: "NVIDIA kernel module flavor (open required for g7/g7e Blackwell)"
 
 Parameters:
   # ---- AMI: build vs reuse -------------------------------------------------
@@ -108,6 +112,17 @@ Parameters:
       SELinux mode baked into the built AMI. 'permissive' (default) works reliably out
       of the gate and logs would-be denials; 'enforcing' is a hardening follow-up.
       Ignored when AmiId is set.
+
+  NvidiaKernelModuleFlavor:
+    Type: String
+    Default: open
+    AllowedValues: [open, proprietary]
+    Description: >-
+      NVIDIA kernel-module flavor baked into the built AMI. 'open' (default) installs
+      the OPEN GPU kernel modules, which Blackwell GPUs (g7/g7e = RTX PRO 6000 Blackwell)
+      REQUIRE -- the closed 'proprietary' modules fail to load on them with "requires use
+      of the NVIDIA open kernel modules" and nvidia-smi finds no GPUs. 'open' also works on
+      the Ada L40S (g6e), so keep the default for the whole G-series. Ignored when AmiId is set.
 
   # ---- Template hosting ----------------------------------------------------
   S3BucketName:
@@ -197,8 +212,18 @@ Parameters:
 
   LoginNodeInstanceType:
     Type: String
-    Default: 'm6i.4xlarge'
+    Default: 'r7i.2xlarge'
     Description: Login node instance type.
+
+  ComputeInitScriptsDir:
+    Type: String
+    Default: '/fsx/s3/compute-init'
+    Description: >-
+      Directory scanned on every COMPUTE node at first boot; each regular file in it
+      runs once (sorted, as root, log-and-continue). Default '/fsx/s3/compute-init' is
+      under the S3<->Lustre DRA mount — upload scripts there (in DataRepositoryS3Bucket)
+      and every compute node runs them at launch. No-op when the folder is absent; set
+      'none' to disable. Login node is always excluded. Forwarded to deploy-all.
 
   PostInstallScriptUrl:
     Type: String
@@ -726,6 +751,61 @@ Parameters:
     Default: 0
     MinValue: 0
 
+  # --- SMALL TEST QUEUES (single-GPU, single-NIC, NO EFA), primary AZ ---
+  # Cheap way to boot ONE real g7e (Blackwell) / g6e (Ada) GPU node and run
+  # nvidia-smi to verify the open-kernel-module fix. Both OFF by default (PCS caps
+  # a cluster at 10 node groups; the default 9 GPU queues + login already hit it, so
+  # enable a test queue only after disabling a 48xl queue). Forwarded to deploy-all.
+  DeployG7eSmallTest:
+    Type: String
+    Description: Deploy a small g7e.2xlarge (1x RTX PRO 6000 Blackwell, no EFA) test queue in the primary AZ for nvidia-smi verification
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eSmallTestName:
+    Type: String
+    Description: Node group + queue name for the g7e small test queue
+    Default: "gpu-g7e-test"
+  G7eSmallTestInstanceType:
+    Type: String
+    Description: Small g7e test instance type (1 GPU, no EFA)
+    Default: "g7e.2xlarge"
+    AllowedValues: ["g7e.2xlarge", "g7e.4xlarge", "g7e.8xlarge", "g7e.16xlarge"]
+  G7eSmallTestMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e small test queue
+    Default: 1
+    MinValue: 0
+  G7eSmallTestMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e small test queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  DeployG6eSmallTest:
+    Type: String
+    Description: Deploy a small g6e.2xlarge (1x L40S, no EFA) test queue in the primary AZ for nvidia-smi verification
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G6eSmallTestName:
+    Type: String
+    Description: Node group + queue name for the g6e small test queue
+    Default: "gpu-g6e-test"
+  G6eSmallTestInstanceType:
+    Type: String
+    Description: Small g6e test instance type (1 GPU, no EFA)
+    Default: "g6e.2xlarge"
+    AllowedValues: ["g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.16xlarge"]
+  G6eSmallTestMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e small test queue
+    Default: 1
+    MinValue: 0
+  G6eSmallTestMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e small test queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
   # --- shared GPU knob (applies to every On-Demand GPU queue above) ---
   RootVolumeSize:
     Type: Number
@@ -846,6 +926,7 @@ Resources:
         SlurmVersion: !Ref SlurmVersion
         SemanticVersion: !Ref SemanticVersion
         SELinuxMode: !Ref SELinuxMode
+        NvidiaKernelModuleFlavor: !Ref NvidiaKernelModuleFlavor
         SubnetId: !Ref BuildSubnet
         SecurityGroupIds: !Ref BuildSecurityGroup
       Tags:
@@ -880,6 +961,7 @@ Resources:
         ManagedAccounting: !Ref ManagedAccounting
         DataRepositoryS3Bucket: !Ref DataRepositoryS3Bucket
         LoginNodeInstanceType: !Ref LoginNodeInstanceType
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !Ref PostInstallScriptUrl
         CreateS3Endpoint: !Ref CreateS3Endpoint
         Capacity: !Ref Capacity
@@ -955,6 +1037,16 @@ Resources:
         G6eHalfAz3Name: !Ref G6eHalfAz3Name
         G6eHalfAz3MaxCount: !Ref G6eHalfAz3MaxCount
         G6eHalfAz3MinCount: !Ref G6eHalfAz3MinCount
+        DeployG7eSmallTest: !Ref DeployG7eSmallTest
+        G7eSmallTestName: !Ref G7eSmallTestName
+        G7eSmallTestInstanceType: !Ref G7eSmallTestInstanceType
+        G7eSmallTestMaxCount: !Ref G7eSmallTestMaxCount
+        G7eSmallTestMinCount: !Ref G7eSmallTestMinCount
+        DeployG6eSmallTest: !Ref DeployG6eSmallTest
+        G6eSmallTestName: !Ref G6eSmallTestName
+        G6eSmallTestInstanceType: !Ref G6eSmallTestInstanceType
+        G6eSmallTestMaxCount: !Ref G6eSmallTestMaxCount
+        G6eSmallTestMinCount: !Ref G6eSmallTestMinCount
         RootVolumeSize: !Ref RootVolumeSize
       Tags:
         - Key: Name

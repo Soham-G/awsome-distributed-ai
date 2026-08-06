@@ -19,7 +19,16 @@ installers, in this order (EC2 Image Builder reboots between kmod layers):
    Enroot-Pyxis, GPU health-check) and `aws ssm` (monitoring Grafana secret). Without it those
    steps fail `aws: command not found`. Baked in from **v1.3.0** onward; the CNG UserData also
    installs it if missing so older AMIs self-heal at first boot.
-2. **NVIDIA driver + CUDA + container toolkit** — from NVIDIA's rhel9 CUDA dnf repo.
+2. **NVIDIA driver + CUDA + container toolkit** — from NVIDIA's rhel9 CUDA dnf repo. The
+   driver is installed as the DKMS module stream `nvidia-driver:<NvidiaDriverBranch>-<flavor>`,
+   where `NvidiaKernelModuleFlavor` picks the flavor: **`open`** (default) → the **open GPU
+   kernel modules** (`-open` stream), or `proprietary` → the closed legacy modules (`-dkms`
+   stream). **Keep `open`** for the g7/g7e/g6e families: g7/g7e are **RTX PRO 6000 Blackwell**,
+   and Blackwell **only** runs on the open modules — the proprietary modules fail to load
+   (`NVRM: ... requires use of the NVIDIA open kernel modules`, `nvidia_init_adapter failed`)
+   and `nvidia-smi` reports *No devices were found*. The open modules also work on the g6e
+   (Ada L40S), so `open` is correct across the whole G-series; only pre-Turing cards (not used
+   here) need `proprietary`.
 3. **EFA** — the `aws-efa-installer` (GPG-verified).
 4. **AWS PCS agent** — the AWS agent installer (GPG-verified). *Required* for the node to
    register with PCS.

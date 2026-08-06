@@ -33,7 +33,8 @@ it directly.
 | Parameter | Default | Purpose |
 |---|---|---|
 | `SlurmVersion` | `25.11` | Slurm version (`25.05` or `25.11`). Drives which monitoring you get (Slurm OpenMetrics is 25.11+ only) and is also threaded into the CNG UserData so the right-version Pyxis is installed; see [OPERATIONS.md §1](./OPERATIONS.md#1-slurm-version-selection) |
-| `LoginNodeInstanceType` | `m6i.4xlarge` | Login node instance type |
+| `LoginNodeInstanceType` | `r7i.2xlarge` | Login node instance type (memory-rich 8 vCPU / 64 GiB; good for interactive use, container builds, and driving jobs) |
+| `ComputeInitScriptsDir` | `/fsx/s3/compute-init` | Folder scanned on every **compute** node at first boot; each regular file runs once (sorted `LC_ALL=C`, as root, log-and-continue — a failure is logged but the node still joins). Default is under the `/fsx/s3` DRA mount, so scripts uploaded to `s3://<DataRepositoryS3Bucket>/compute-init/` auto-run on every compute node at launch (a lightweight per-node init hook; runs after `/fsx` is mounted, **not** per-job). No-op when the folder is absent, so it is safe at the default even without a DRA. `none` disables it; the **login node is always excluded**. See [G7E-DEPLOY.md](./G7E-DEPLOY.md#per-node-compute-init-scripts-computeinitscriptsdir) |
 | `RootVolumeSize` | `300` | Root EBS volume size (GiB) on every node (login + compute); 300 leaves room for large container images (Megatron `.sqsh` ~20 GB) |
 | `AmiId` | *(empty → SSM auto-resolve)* | AMI ID for every node group. **Empty (default) auto-resolves to the latest PCS-Ready Deep Learning AMI** (Ubuntu 24.04, x86_64) from SSM (`/aws/service/pcs/ami/dlami-base-ubuntu2404/x86_64/latest/ami-id`). For production, **pin to a specific `ami-xxx`** so a later scale-out cannot drift onto a newer base. Use a custom AMI built off the PCS-Ready DLAMI base (e.g. via [`pcs-ready-dlami-with-enroot-pyxis.yaml`](../README.md#85-pre-baking-enrootpyxis-into-a-custom-ami)) when you want Enroot/Pyxis pre-baked or other customizations. See [OPERATIONS.md §2.5](./OPERATIONS.md#25-ami-selection-amiid--pin-in-production) |
 | `SSHAccessCidr` | *(empty)* | When set to a CIDR, opens SSH/22 on the login node to that CIDR via a login-only security group (attached to the login node only, never compute). Empty (default) = SSH over SSM only. Set to your office/VPN range for direct `ssh`/`scp`/VS Code Remote (common for multi-user clusters) |
@@ -162,6 +163,16 @@ half = `add-cng-g6e-24xl.yaml` (2 NIC).
 | `G6eHalfAz3Name` | `gpu-g6e-half-az3` | g6e half (AZ3) node-group + Slurm queue name |
 | `G6eHalfAz3MinCount` | `0` | g6e half (AZ3) minimum nodes (0 = dynamic scaling) |
 | `G6eHalfAz3MaxCount` | `2` | g6e half (AZ3) maximum nodes |
+| `DeployG7eSmallTest` | `false` | Deploy a small **single-GPU, no-EFA** g7e test queue in the primary AZ (uses the generic `add-cng.yaml`, not the 4-NIC-EFA g7e template). For cheaply verifying `nvidia-smi` on a real Blackwell node. **Off by default** — login + the 9 default GPU queues already hit the PCS 10-node-group cap, so free a slot (disable a 48xl queue) before enabling |
+| `G7eSmallTestName` | `gpu-g7e-test` | g7e small test node-group + Slurm queue name |
+| `G7eSmallTestInstanceType` | `g7e.2xlarge` | g7e small test instance type (`g7e.2xlarge`/`4xlarge`/`8xlarge`/`16xlarge` — all 1-GPU, no EFA) |
+| `G7eSmallTestMinCount` | `0` | g7e small test minimum nodes (0 = dynamic scaling) |
+| `G7eSmallTestMaxCount` | `1` | g7e small test maximum nodes |
+| `DeployG6eSmallTest` | `false` | Deploy a small **single-GPU, no-EFA** g6e test queue in the primary AZ (generic `add-cng.yaml`). For verifying `nvidia-smi` on a real L40S node. **Off by default** (same 10-node-group-cap caveat as `DeployG7eSmallTest`) |
+| `G6eSmallTestName` | `gpu-g6e-test` | g6e small test node-group + Slurm queue name |
+| `G6eSmallTestInstanceType` | `g6e.2xlarge` | g6e small test instance type (`g6e.2xlarge`/`4xlarge`/`8xlarge`/`16xlarge` — all 1-GPU, no EFA) |
+| `G6eSmallTestMinCount` | `0` | g6e small test minimum nodes (0 = dynamic scaling) |
+| `G6eSmallTestMaxCount` | `1` | g6e small test maximum nodes |
 | `GpuUsePlacementGroup` | `true` | Shared across **all** g7/g7e/g6e queues. Launch On-Demand GPU nodes into a cluster placement group (`true`, lowest inter-node latency for tightly-coupled multi-node jobs). Set `false` to relax placement — a cluster placement group forces all nodes into one tight physical group, which can cause `InsufficientInstanceCapacity` for scarce GPU types even when the AZ has capacity; relaxing it improves On-Demand launch success (best for single-node jobs or when you hit ICE) |
 
 > **Note — g7/g7e/g6e and Capacity Blocks.** These families are **not** eligible for

@@ -34,6 +34,16 @@ queue per AZ. The template ships ten independent On-Demand queues:
 | `gpu-g6e-half-az2` | g6e.24xlarge | AZ2 | on |
 | `gpu-g6e-full-az3` | g6e.48xlarge | AZ3 (`AdditionalSubnetAZ3`) | on |
 | `gpu-g6e-half-az3` | g6e.24xlarge | AZ3 | on |
+| `gpu-g7e-test`     | g7e.2xlarge (1 GPU, no EFA) | primary | **off** |
+| `gpu-g6e-test`     | g6e.2xlarge (1 GPU, no EFA) | primary | **off** |
+
+> The last two are **small single-GPU test queues** (`DeployG7eSmallTest` /
+> `DeployG6eSmallTest`, both **off** by default). A `g7e.2xlarge` / `g6e.2xlarge` has one
+> GPU and a single non-EFA NIC, so they use the generic `add-cng.yaml` (not the 4-NIC-EFA
+> 48xl templates) — a cheap way to boot one real Blackwell (g7e) / Ada (g6e) node and
+> confirm `nvidia-smi` works (e.g. after an AMI/driver change). Because login + the 9
+> default GPU queues already hit the 10-node-group cap, **disable one 48xl queue before
+> enabling a test queue** (see the cap note below).
 
 > **PCS caps a cluster at 10 compute node groups and 10 queues (both non-adjustable).**
 > The login node group always consumes one node-group slot, so all ten GPU queues can't
@@ -175,7 +185,7 @@ aws cloudformation create-stack \
     ParameterKey=S3BucketName,ParameterValue=${BUCKET} \
     ParameterKey=S3KeyPrefix,ParameterValue=${PREFIX} \
     ParameterKey=GpuUsePlacementGroup,ParameterValue=false \
-    ParameterKey=LoginNodeInstanceType,ParameterValue=c7i.xlarge \
+    ParameterKey=LoginNodeInstanceType,ParameterValue=r7i.2xlarge \
     ParameterKey=SSHAccessCidr,ParameterValue=${SSH_CIDR} \
     ParameterKey=ManagedAccounting,ParameterValue=enabled \
     ParameterKey=DirectoryService,ParameterValue=OpenLDAP-LoginNode \
@@ -226,7 +236,7 @@ Useful parameter notes:
 | `DeployG6eFullAz3` / `DeployG6eHalfAz3` | `true` (default) | Same g6e templates, pinned to AZ3 |
 | `G7*/G7e*/G6e*MaxCount` | `2` | Per-queue max nodes; matching `…MinCount` defaults to 0 (scales from zero) |
 | `GpuUsePlacementGroup` | `true` (default) | Applies to **all** g7/g7e/g6e queues. Set `false` to drop the cluster placement group — a cluster PG forces all nodes into one tight physical group and can cause `InsufficientInstanceCapacity` for scarce types; relaxing it improves launch success (best for single-node jobs; multi-node loses some latency locality) |
-| `LoginNodeInstanceType` | `c7i.xlarge` | Login node size (default `m6i.4xlarge`) |
+| `LoginNodeInstanceType` | `r7i.2xlarge` (default) | Login node size. Default is `r7i.2xlarge` — a memory-rich 8 vCPU / 64 GiB node comfortable for interactive use, container builds, and driving jobs |
 | `OnDemandInstanceType` | `c7i.4xlarge` | CPU queue node size (default `c6i.4xlarge`) |
 | `SSHAccessCidr` | `203.0.113.4/32` | Opens SSH/22 on the login node to this CIDR. **Replace with your own IP/CIDR.** Empty (default) = SSM only |
 | `ManagedAccounting` | `enabled` | Turns on Slurm accounting (per-user/job usage, `sacct`/`sreport`). Needs Slurm 24.11+ (the default 25.11 qualifies) |
@@ -237,6 +247,7 @@ Useful parameter notes:
 | `AmiId` | *(empty → build Rocky)* | Empty (default) builds the Rocky 9 GPU AMI in-stack from `BaseAmiId`, then deploys on it. Set to a Rocky PCS AMI you built earlier to **skip the build** (~25–30 min deploy) — then `BaseAmiId` is ignored |
 | `SemanticVersion` | `1.3.0` | Image Builder recipe version for the in-stack build. **Bump on every rebuild** against edited templates (a reused version reuses the cached build). Ignored when reusing an `AmiId` |
 | `DataRepositoryS3Bucket` | `${FSX_S3_BUCKET}` | Links this S3 bucket to the Lustre `/fsx` filesystem — its contents appear under `/fsx/s3` and changes sync back (bidirectional). Set in Step 3; **must be same-Region**. Empty = plain scratch `/fsx` (no link). See [linking an S3 bucket to /fsx](#linking-an-s3-bucket-to-fsx-datarepositorys3bucket) below |
+| `ComputeInitScriptsDir` | `/fsx/s3/compute-init` (default) | Folder scanned on every **compute** node at first boot; each regular file runs once (sorted, as root, log-and-continue). The default is under the `/fsx/s3` DRA mount, so scripts you upload to `s3://<DataRepositoryS3Bucket>/compute-init/` auto-run on every compute node at launch. No-op when the folder is absent (so it's safe by default even without the DRA). `none` disables it; the login node is always excluded. See [per-node compute-init scripts](#per-node-compute-init-scripts-computeinitscriptsdir) below |
 
 > **Slurm accounting + multi-user.** `ManagedAccounting=enabled` pairs naturally with
 > `DirectoryService=OpenLDAP-LoginNode` so usage is attributed per real user. To enforce
@@ -339,6 +350,44 @@ is a separate resource, so toggling it does **not** replace the filesystem.
 > fails the stack at create time otherwise. No bucket policy or extra IAM is needed for a
 > same-account bucket (FSx uses its own service-linked role). Give the **bare bucket name**,
 > not an `s3://` URI. Full parameter reference: [PARAMETERS.md](./PARAMETERS.md).
+
+### Per-node compute-init scripts (`ComputeInitScriptsDir`)
+
+Every **compute** node runs a small init hook at first boot that executes each script in a
+folder — a lightweight, per-node equivalent of a boot-time prolog. It defaults to
+**`/fsx/s3/compute-init`**, a folder under the `/fsx/s3` DRA mount, so the workflow is just
+"drop a script in the S3 bucket, and every compute node runs it at launch":
+
+```bash
+# with DataRepositoryS3Bucket set (see above), from anywhere:
+cat > gpu-check.sh <<'EOF'
+#!/usr/bin/env bash
+nvidia-smi -L > /var/log/my-gpu-inventory.txt 2>&1
+EOF
+aws s3 cp gpu-check.sh s3://${FSX_S3_BUCKET}/compute-init/10-gpu-check.sh
+#   -> auto-imports to /fsx/s3/compute-init/10-gpu-check.sh
+#   -> runs once on each compute node the next time one launches
+```
+
+Behavior and guarantees:
+
+- **When:** once per node, at first boot, **after** `/fsx` is mounted (so `/fsx/s3` is
+  readable). It does **not** re-run per job — for a true per-job Slurm prolog use the
+  GPU health-check prolog (`GpuHealthCheck=prolog`) instead.
+- **Order:** all regular files at the top level of the folder, in `LC_ALL=C` sorted order
+  (prefix with `10-`, `20-`, … to control sequence). Subdirectories are ignored.
+- **As root**, with `PCS_SLURM_VERSION` exported. Output is logged to
+  `/var/log/pcs-compute-init.log` on each node.
+- **Log-and-continue:** a failing script is logged with its exit code but the node still
+  joins the cluster (no drain/replace loop). Make scripts idempotent.
+- **Scope:** compute node groups only — the **login node is always excluded**.
+- **Safe by default / off switch:** it is a **no-op when the folder is absent** (e.g. you
+  didn't set `DataRepositoryS3Bucket`, or haven't uploaded anything), so the default is
+  harmless. Point it at any shared-FS path, or set `ComputeInitScriptsDir=none` to disable.
+
+> Because the folder lives on the DRA, a script uploaded to S3 **after** the cluster is up
+> auto-appears on `/fsx/s3` and runs on the **next** node to launch — already-running nodes
+> are not retroactively re-run (the hook is first-boot only).
 
 ## 4. Monitor progress
 

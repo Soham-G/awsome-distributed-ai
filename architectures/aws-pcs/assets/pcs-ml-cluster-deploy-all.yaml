@@ -101,7 +101,20 @@ Metadata:
           - G6eHalfAz3MinCount
           - G6eHalfAz3MaxCount
       - Label:
-          default: "4e. Shared GPU queue setting"
+          default: "4e. Small GPU test queues (single-GPU, no EFA, primary AZ). OFF by default; enable one only after freeing a node-group slot (disable a 48xl queue). For verifying nvidia-smi."
+        Parameters:
+          - DeployG7eSmallTest
+          - G7eSmallTestName
+          - G7eSmallTestInstanceType
+          - G7eSmallTestMinCount
+          - G7eSmallTestMaxCount
+          - DeployG6eSmallTest
+          - G6eSmallTestName
+          - G6eSmallTestInstanceType
+          - G6eSmallTestMinCount
+          - G6eSmallTestMaxCount
+      - Label:
+          default: "4f. Shared GPU queue setting"
         Parameters:
           - GpuUsePlacementGroup
       - Label:
@@ -575,10 +588,22 @@ Parameters:
       - 'none'
       - 'prolog'
 
+  ComputeInitScriptsDir:
+    Type: String
+    Description: >-
+      Directory scanned on every COMPUTE node at first boot; each regular file in it
+      is run once (sorted, as root, log-and-continue). Default '/fsx/s3/compute-init'
+      is a folder under the S3<->Lustre DRA mount — upload scripts to that path in the
+      DataRepositoryS3Bucket and every compute node runs them at launch (a lightweight
+      per-node init hook). No-op when the folder is absent (e.g. no S3 DRA configured
+      or nothing uploaded), so it is safe to leave at the default. Set to 'none' to
+      disable entirely. The login node is always excluded (deploy-all passes 'none').
+    Default: '/fsx/s3/compute-init'
+
   LoginNodeInstanceType:
     Type: String
     Description: Instance Type for Login Node Group
-    Default: "m6i.4xlarge"
+    Default: "r7i.2xlarge"
 
   # Monitoring Configuration
   SSHAccessCidr:
@@ -995,6 +1020,71 @@ Parameters:
     Default: 0
     MinValue: 0
 
+  # --- SMALL TEST QUEUES (single-GPU, single-NIC, NO EFA) -------------------
+  # g7e.2xlarge / g6e.2xlarge each have 1 GPU and 1 network card with no EFA, so
+  # they use the GENERIC add-cng.yaml (EfaInterfaceCount=0), NOT the 4-NIC-EFA
+  # add-cng-g7e/g6e templates that lock InstanceType to the 48xlarge. These are a
+  # cheap way to boot a real Blackwell (g7e) / Ada (g6e) GPU node and verify
+  # nvidia-smi after the open-kernel-module AMI fix. Both default OFF: the default
+  # 9 GPU queues + login already hit the PCS 10-node-group cap, so enabling a test
+  # queue requires disabling one of the 48xl queues (see G7E-DEPLOY.md). They launch
+  # in the PRIMARY AZ (no extra subnet needed).
+  DeployG7eSmallTest:
+    Type: String
+    Description: >-
+      Deploy a small g7e.2xlarge (1x RTX PRO 6000 Blackwell, no EFA) On-Demand test
+      queue in the primary AZ for verifying nvidia-smi. OFF by default; enabling it
+      needs a free node-group slot (disable a 48xl queue to stay under the PCS cap of 10).
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G7eSmallTestName:
+    Type: String
+    Description: Node group + queue name for the g7e small test queue
+    Default: "gpu-g7e-test"
+  G7eSmallTestInstanceType:
+    Type: String
+    Description: Small g7e test instance type (1 GPU, no EFA)
+    Default: "g7e.2xlarge"
+    AllowedValues: ["g7e.2xlarge", "g7e.4xlarge", "g7e.8xlarge", "g7e.16xlarge"]
+  G7eSmallTestMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g7e small test queue
+    Default: 1
+    MinValue: 0
+  G7eSmallTestMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g7e small test queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
+  DeployG6eSmallTest:
+    Type: String
+    Description: >-
+      Deploy a small g6e.2xlarge (1x L40S, no EFA) On-Demand test queue in the primary
+      AZ for verifying nvidia-smi. OFF by default; enabling it needs a free node-group
+      slot (disable a 48xl queue to stay under the PCS cap of 10).
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  G6eSmallTestName:
+    Type: String
+    Description: Node group + queue name for the g6e small test queue
+    Default: "gpu-g6e-test"
+  G6eSmallTestInstanceType:
+    Type: String
+    Description: Small g6e test instance type (1 GPU, no EFA)
+    Default: "g6e.2xlarge"
+    AllowedValues: ["g6e.2xlarge", "g6e.4xlarge", "g6e.8xlarge", "g6e.16xlarge"]
+  G6eSmallTestMaxCount:
+    Type: Number
+    Description: Maximum number of instances for the g6e small test queue
+    Default: 1
+    MinValue: 0
+  G6eSmallTestMinCount:
+    Type: Number
+    Description: Minimum number of instances for the g6e small test queue (0 for dynamic scaling)
+    Default: 0
+    MinValue: 0
+
   # --- shared GPU knob (applies to every On-Demand GPU queue above) ---
   GpuUsePlacementGroup:
     Type: String
@@ -1177,6 +1267,9 @@ Conditions:
   DeployG6eHalfAz3Enabled: !And
     - !Equals [!Ref DeployG6eHalfAz3, 'true']
     - !Condition HasSubnetAZ3
+  # Small single-GPU test queues (primary AZ, no EFA, generic add-cng.yaml).
+  DeployG7eSmallTestEnabled: !Equals [!Ref DeployG7eSmallTest, 'true']
+  DeployG6eSmallTestEnabled: !Equals [!Ref DeployG6eSmallTest, 'true']
 
 Resources:
   #############################################################################
@@ -1304,6 +1397,8 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: login
+        # Login node is deliberately excluded from the compute-init hook.
+        ComputeInitScriptsDir: 'none'
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1351,6 +1446,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1404,6 +1500,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1453,6 +1550,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1502,6 +1600,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1552,6 +1651,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1602,6 +1702,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1652,6 +1753,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1702,6 +1804,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1752,6 +1855,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1802,6 +1906,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1852,6 +1957,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1902,6 +2008,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -1952,6 +2059,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -2002,6 +2110,7 @@ Resources:
         DcgmExporterImage: !Ref DcgmExporterImage
         SlurmVersion: !Ref SlurmVersion
         MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
         PostInstallScriptUrl: !If
           - PostInstallScriptUrlIsDefault
           - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
@@ -2015,6 +2124,112 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-G6eHalfAz3'
+
+  #############################################################################
+  # SMALL TEST QUEUES (single-GPU, single-NIC, NO EFA) — primary AZ.
+  # These deliberately use the GENERIC add-cng.yaml with EfaInterfaceCount=0:
+  # a g7e.2xlarge / g6e.2xlarge has one network card and no EFA, so the 4-NIC-EFA
+  # add-cng-g7e/g6e templates (locked to the 48xlarge) cannot launch them. Purpose:
+  # cheaply boot ONE real Blackwell (g7e) / Ada (g6e) GPU node to run nvidia-smi and
+  # confirm the open-kernel-module AMI fix. Both OFF by default (PCS 10-node-group cap).
+  #############################################################################
+  G7eSmallTestCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG7eSmallTestEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G7eSmallTestName
+        QueueName: !Ref G7eSmallTestName
+        InstanceType: !Ref G7eSmallTestInstanceType
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G7eSmallTestMaxCount
+        MinCount: !Ref G7eSmallTestMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        # No EFA on the 2xlarge; leaving PlacementGroupName empty + EfaInterfaceCount=0
+        # means add-cng.yaml creates NO cluster placement group (best for a single node).
+        EfaInterfaceCount: 0
+        PlacementGroupName: ''
+        GpuHealthCheck: !Ref GpuHealthCheck
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G7eSmallTest'
+
+  G6eSmallTestCNGStack:
+    Type: AWS::CloudFormation::Stack
+    Condition: DeployG6eSmallTestEnabled
+    DependsOn: ClusterStack
+    Properties:
+      TemplateURL: !If
+        - UseLocalTemplates
+        - add-cng.yaml
+        - !Sub 'https://${S3BucketName}.s3.amazonaws.com/${S3KeyPrefix}add-cng.yaml'
+      Parameters:
+        ClusterId: !GetAtt ClusterStack.Outputs.ClusterId
+        ClusterName: !Sub '${AWS::StackName}'
+        CngName: !Ref G6eSmallTestName
+        QueueName: !Ref G6eSmallTestName
+        InstanceType: !Ref G6eSmallTestInstanceType
+        RootVolumeSize: !Ref RootVolumeSize
+        MaxCount: !Ref G6eSmallTestMaxCount
+        MinCount: !Ref G6eSmallTestMinCount
+        SubnetId: !GetAtt PrerequisitesStack.Outputs.PrimaryPrivateSubnet
+        AmiId: !Ref AmiId
+        ClusterSecurityGroupId: !GetAtt PrerequisitesStack.Outputs.SecurityGroup
+        IamProfileArn: !GetAtt ClusterStack.Outputs.InstanceProfileArn
+        FSxLustreFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemId
+        FSxLustreFilesystemMountName: !GetAtt PrerequisitesStack.Outputs.FSxLustreFilesystemMountname
+        FSxOpenZFSFilesystemId: !GetAtt PrerequisitesStack.Outputs.FSxOFilesystemId
+        DeployMonitoring: !If [MonitoringEnabled, "true", "false"]
+        MonitoringVersion: !Ref MonitoringVersion
+        MonitoringRepo: !Ref MonitoringRepo
+        DcgmExporterImage: !Ref DcgmExporterImage
+        SlurmVersion: !Ref SlurmVersion
+        MonitoringRole: compute
+        ComputeInitScriptsDir: !Ref ComputeInitScriptsDir
+        PostInstallScriptUrl: !If
+          - PostInstallScriptUrlIsDefault
+          - !Sub 's3://${S3BucketName}/${S3KeyPrefix}scripts/install-enroot-pyxis.sh'
+          - !Ref PostInstallScriptUrl
+        PostInstallScriptArgs: !Ref PostInstallScriptArgs
+        EfaInterfaceCount: 0
+        PlacementGroupName: ''
+        GpuHealthCheck: !Ref GpuHealthCheck
+        DirectoryRole: !If [DirectoryEnabled, 'client', 'none']
+        DirectoryDomainSuffix: !Ref DirectoryDomainSuffix
+        S3BucketName: !Ref S3BucketName
+        S3KeyPrefix: !Ref S3KeyPrefix
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-G6eSmallTest'
 
 Outputs:
   ClusterId:

@@ -146,12 +146,28 @@ Parameters:
     Type: String
     Description: >-
       NVIDIA datacenter driver branch. Installed from NVIDIA's rhel9 CUDA dnf repo as
-      the DKMS module STREAM 'nvidia-driver:<this>-dkms' (verified: `dnf module list
+      a DKMS module STREAM 'nvidia-driver:<this>-<flavor>' (verified: `dnf module list
       nvidia-driver` on Rocky 9 lists 570 / 570-dkms / 570-open as separate streams).
-      The -dkms stream BUILDS the kmod against the running kernel via DKMS (requires
-      EPEL's dkms >= 3.1.8, installed by this component). 570 covers the G-series GPUs
-      here (g6e=L40S, g7/g7e=RTX PRO). Bump deliberately to another listed branch.
+      The DKMS streams BUILD the kmod against the running kernel (requires EPEL's
+      dkms >= 3.1.8, installed by this component). 570 covers the G-series GPUs here
+      (g6e=L40S, g7/g7e=RTX PRO 6000 Blackwell). Bump deliberately to another listed branch.
     Default: '570'
+
+  NvidiaKernelModuleFlavor:
+    Type: String
+    AllowedValues:
+      - open
+      - proprietary
+    Description: >-
+      Which NVIDIA kernel-module flavor to install. 'open' -> the OPEN GPU kernel
+      modules (dnf stream 'nvidia-driver:<branch>-open'); 'proprietary' -> the closed
+      legacy modules (stream 'nvidia-driver:<branch>-dkms'). Blackwell and newer GPUs
+      (g7/g7e = RTX PRO 6000 Blackwell) REQUIRE the open modules -- the proprietary
+      modules refuse to load with "requires use of the NVIDIA open kernel modules" and
+      nvidia-smi reports no GPUs. The open modules are supported on Turing and newer, so
+      'open' is the safe default across the whole G-series (g6e L40S = Ada is also
+      open-capable). Only pick 'proprietary' for older (pre-Turing) cards not used here.
+    Default: open
 
   EfaInstallerVersion:
     Type: String
@@ -435,10 +451,17 @@ Resources:
                       #      without EPEL there is NO dkms at all, so every driver pkg is filtered).
                       #   2. NO 'module_hotfixes=1' on the cuda repo -- that lets dnf mix streams
                       #      and pull a NEWER branch (e.g. 610) that then hits obsoletes conflicts.
-                      #   3. Explicitly module reset -> enable -> install the '<branch>-dkms' STREAM
-                      #      (the dash form IS a real stream: `dnf module list nvidia-driver` shows
-                      #      570 / 570-dkms / 570-open, each with profiles default/fm/ks). Pinning
-                      #      the one stream avoids the cross-branch version conflict.
+                      #   3. Explicitly module reset -> enable -> install the '<branch>-<flavor>'
+                      #      STREAM (the dash form IS a real stream: `dnf module list nvidia-driver`
+                      #      shows 570 / 570-dkms / 570-open, each with profiles default/fm/ks).
+                      #      Pinning the one stream avoids the cross-branch version conflict.
+                      #   4. FLAVOR MATTERS: Blackwell and newer GPUs (g7/g7e = RTX PRO 6000
+                      #      Blackwell) ONLY run on the OPEN kernel modules. Installing the closed
+                      #      '<branch>-dkms' stream on them builds a kmod that refuses to load at
+                      #      boot with "requires use of the NVIDIA open kernel modules ... device
+                      #      minor number ... nvidia_init_adapter failed", so nvidia-smi reports
+                      #      "No devices were found". The open stream ('<branch>-open') is what these
+                      #      cards need and is also fine on Turing/Ada (g6e L40S), hence the default.
                       # The DKMS module compiles against the running kernel -- which is why the
                       # kernel-update + REBOOT (component 1) must run first, so the running kernel
                       # matches the available kernel-devel headers.
@@ -455,10 +478,19 @@ Resources:
                       # NVIDIA CUDA repo for RHEL/Rocky 9 (x86_64). Do NOT add module_hotfixes here.
                       dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
                       dnf -y clean all
-                      # Pin exactly the <branch>-dkms stream (reset any prior enablement first).
+                      # Map the CFN flavor param onto the real dnf stream suffix:
+                      #   open        -> nvidia-driver:<branch>-open  (OPEN kernel modules; Blackwell needs this)
+                      #   proprietary -> nvidia-driver:<branch>-dkms  (closed legacy modules; pre-Turing only)
+                      case "${NvidiaKernelModuleFlavor}" in
+                        open)        NV_STREAM="${NvidiaDriverBranch}-open" ;;
+                        proprietary) NV_STREAM="${NvidiaDriverBranch}-dkms" ;;
+                        *)           echo "ERROR - unknown NvidiaKernelModuleFlavor '${NvidiaKernelModuleFlavor}'"; exit 1 ;;
+                      esac
+                      echo "Installing NVIDIA driver stream nvidia-driver:${!NV_STREAM}"
+                      # Pin exactly that stream (reset any prior enablement first).
                       dnf -y module reset nvidia-driver || true
-                      dnf -y module enable "nvidia-driver:${NvidiaDriverBranch}-dkms"
-                      dnf -y module install "nvidia-driver:${NvidiaDriverBranch}-dkms"
+                      dnf -y module enable "nvidia-driver:${!NV_STREAM}"
+                      dnf -y module install "nvidia-driver:${!NV_STREAM}"
                       # Fail loudly (at install, not the later validate step) if no driver landed.
                       # NOTE: do NOT use `rpm -qa | grep -q ...` here -- under `set -o pipefail`,
                       # grep -q closes the pipe on first match and rpm -qa dies with SIGPIPE (141),
@@ -466,7 +498,7 @@ Resources:
                       # false-negative failed several builds despite a clean install). Capture the
                       # rpm output first, then match without a pipe.
                       installed_rpms="$(rpm -qa)"
-                      echo "${!installed_rpms}" | grep -iE 'nvidia-driver-[0-9]|kmod-nvidia' || { echo "ERROR - NVIDIA ${NvidiaDriverBranch}-dkms driver did not install"; exit 1; }
+                      echo "${!installed_rpms}" | grep -iE 'nvidia-driver-[0-9]|nvidia-open|kmod-nvidia' || { echo "ERROR - NVIDIA nvidia-driver:${!NV_STREAM} driver did not install"; exit 1; }
                       dnf -y install cuda-toolkit || true
                       # NVIDIA container toolkit (libnvidia-container) for Enroot/Pyxis GPU containers.
                       curl -fsSL https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo -o /etc/yum.repos.d/nvidia-container-toolkit.repo
@@ -491,7 +523,9 @@ Resources:
                       # Capture rpm output first (NOT `rpm -qa | grep -q`, which dies with SIGPIPE
                       # under pipefail and false-negatives even when the driver IS installed).
                       installed_rpms="$(rpm -qa)"
-                      echo "${!installed_rpms}" | grep -iE 'nvidia-driver-[0-9]|kmod-nvidia' || { echo "ERROR - NVIDIA driver package not installed"; exit 1; }
+                      # Match either flavor: closed (nvidia-driver-<ver>, kmod-nvidia-*) or
+                      # open (nvidia-open, kmod-nvidia-open-dkms).
+                      echo "${!installed_rpms}" | grep -iE 'nvidia-driver-[0-9]|nvidia-open|kmod-nvidia' || { echo "ERROR - NVIDIA driver package not installed"; exit 1; }
                       command -v nvidia-smi >/dev/null 2>&1 || { echo "ERROR - nvidia-smi binary missing"; exit 1; }
                       # kernel module built for the running kernel (loads on a real GPU node).
                       modinfo nvidia >/dev/null 2>&1 || echo "WARN - nvidia kmod not visible to modinfo on the GPU-less builder (verify on a GPU node)"
